@@ -142,6 +142,19 @@ button{font-family:'Barlow',sans-serif}
 .field input:focus{outline:2px solid var(--accent);outline-offset:1px}
 select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);border-radius:3px;
   padding:4px 6px;font-family:'Barlow',sans-serif;font-size:13px}
+.rsec{display:flex;align-items:baseline;gap:6px;padding:11px 14px 3px;
+  border-top:1px solid var(--line);margin-top:4px}
+.rsec:first-of-type{border-top:none;margin-top:0}
+.rsecn{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;color:var(--accent)}
+.rsecl{font-size:12px;color:var(--muted)}
+.rrank{display:flex;align-items:center;gap:9px;padding:5px 14px}
+.rplace{font-size:17px;font-weight:600;color:var(--muted);min-width:20px;text-align:right}
+.rplace.top{color:var(--accent)}
+.rname{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:50px}
+.rbarwrap{width:56px;height:6px;background:#05070A;border-radius:2px;overflow:hidden;flex-shrink:0}
+.rbar{height:100%;background:linear-gradient(90deg,#5A7A9E,var(--accent))}
+.rrec{font-size:17px;font-weight:600;width:42px;text-align:right;flex-shrink:0}
+.rpct{font-size:14px;color:var(--muted);width:38px;text-align:right;flex-shrink:0}
 .sumbox{width:100%;height:260px;background:#05070A;color:var(--chalk);border:1px solid var(--line);
   border-radius:3px;padding:9px;font-family:ui-monospace,monospace;font-size:12px;resize:none}
 .note{color:var(--muted);font-size:13px;padding:8px 14px}
@@ -166,6 +179,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <button class="link" id="btnArrivals">Arrivals</button>
     <button class="link" id="btnRoster">Roster</button>
     <button class="link" id="btnFinance">Finance</button>
+    <button class="link" id="btnRanks">Rankings</button>
     <button class="link" id="btnSummary">Summary</button>
     <button class="link" id="btnReset">Reset</button>
   </div>
@@ -313,7 +327,7 @@ function freshState(){
   SEED.forEach(function(p){
     var id = "p" + (uid++);
     players[id] = {id:id, name:p[0], level:p[1], status:"notyet",
-                   games:0, benchSince:null, totalIdle:0, pay:"unpaid"};
+                   games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid"};
     order.push(id);
   });
   return {
@@ -459,13 +473,18 @@ function sendToCourt(court, ids){
   });
   commit();
 }
-function endGame(court){
+function endGame(court, winner){
   var now = Date.now();
-  court.slots.forEach(function(id){
+  court.slots.forEach(function(id, i){
     if(!id) return;
     var p = S.players[id];
     p.games += 1;
     p.benchSince = now;
+    if(winner === 0 || winner === 1){
+      var side = i < 2 ? 0 : 1;
+      if(side === winner) p.wins = (p.wins||0) + 1;
+      else p.losses = (p.losses||0) + 1;
+    }
   });
   court.slots = [null,null,null,null];
   court.startedAt = null;
@@ -565,7 +584,10 @@ function render(){
     }
     if(filled > 0){
       var eb = el("button","btn sm go","End game");
-      eb.onclick = function(){ endGame(court); };
+      eb.onclick = function(){
+        if(filled === 4) askWinner(court);
+        else endGame(court, null);
+      };
       row.appendChild(eb);
     }
     if(filled < 4 && bench.length){
@@ -783,7 +805,7 @@ function rosterModal(){
       if(!nm) return;
       var id = "p" + (uid++);
       S.players[id] = {id:id, name:nm, level:sel.value, status:"notyet",
-                       games:0, benchSince:null, totalIdle:0, pay:"unpaid"};
+                       games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid"};
       S.order.push(id);
       close(); commit(); rosterModal();
     }
@@ -983,18 +1005,112 @@ function financeModal(){
     refresh();
   });
 }
+/* ---------- who won ---------- */
+function sideNames(court, side){
+  var ids = side === 0 ? [court.slots[0], court.slots[1]] : [court.slots[2], court.slots[3]];
+  return ids.filter(Boolean).map(function(id){ return S.players[id].name; }).join(" & ");
+}
+function askWinner(court){
+  modal("Court " + court.n + " \u2014 who won?", function(body, foot, close){
+    [0,1].forEach(function(side){
+      var b = document.createElement("button");
+      b.className = "pick";
+      var box = el("div","pn", sideNames(court, side));
+      box.style.fontSize = "16px";
+      b.appendChild(box);
+      var w = el("div","pt num","WIN");
+      w.style.color = "var(--accent)";
+      b.appendChild(w);
+      b.onclick = function(){ close(); endGame(court, side); };
+      body.appendChild(b);
+    });
+    var skip = el("button","btn","End without a result");
+    skip.onclick = function(){ close(); endGame(court, null); };
+    foot.appendChild(skip);
+  });
+}
+
+/* ---------- rankings ---------- */
+function ranksModal(){
+  modal("Rankings", function(body, foot, close){
+    var played = S.order.map(function(id){ return S.players[id]; })
+      .filter(function(p){ return (p.wins||0) + (p.losses||0) > 0; });
+
+    if(!played.length){
+      body.appendChild(el("div","empty-note",
+        "No results recorded yet. Pick a winning side when you end a game and the board fills up."));
+      return;
+    }
+
+    played.sort(function(a,b){
+      var w = (b.wins||0) - (a.wins||0);
+      if(w) return w;
+      var l = (a.losses||0) - (b.losses||0);
+      if(l) return l;
+      return a.name.localeCompare(b.name);
+    });
+
+    // place: identical records share one. win count drives the section headers.
+    var rank = 0, prevKey = null, prevWins = null;
+    body.appendChild(el("div","note",
+      played.length + " players with results \u00b7 ranked by wins, then fewest losses"));
+
+    played.forEach(function(p){
+      var wins = p.wins||0, losses = p.losses||0;
+      var key = wins + "/" + losses;
+      if(key !== prevKey){ rank++; prevKey = key; }
+
+      if(wins !== prevWins){
+        var h = el("div","rsec");
+        h.appendChild(el("span","rsecn num", wins));
+        h.appendChild(el("span","rsecl", wins === 1 ? "win" : "wins"));
+        body.appendChild(h);
+        prevWins = wins;
+      }
+
+      var total = wins + losses;
+      var pct = total ? Math.round(wins/total*100) : 0;
+      var row = el("div","rrank");
+
+      var pl = el("div","rplace num", rank);
+      if(rank <= 3) pl.classList.add("top");
+      row.appendChild(pl);
+      row.appendChild(el("div","rname", p.name));
+
+      var bar = el("div","rbarwrap");
+      var fill = el("div","rbar");
+      fill.style.width = pct + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+
+      var rec = el("div","rrec num", wins + "\u2013" + losses);
+      row.appendChild(rec);
+      row.appendChild(el("div","rpct num", pct + "%"));
+      body.appendChild(row);
+    });
+
+    var noRes = S.order.map(function(id){ return S.players[id]; })
+      .filter(function(p){ return p.games > 0 && (p.wins||0) + (p.losses||0) === 0; }).length;
+    if(noRes){
+      body.appendChild(el("div","note",
+        noRes + (noRes === 1 ? " player has" : " players have")
+        + " games with no recorded result, so they are not on the board."));
+    }
+  });
+}
+
 /* ---------- summary ---------- */
 function summaryModal(){
   var m = money();
   var lines = [];
   lines.push(S.name + "  \u2014  " + new Date(S.startedAt).toLocaleDateString());
   lines.push("");
-  lines.push("Player\tLevel\tGames\tWaited\tOwed\tPaid");
+  lines.push("Player\tLevel\tGames\tWon\tLost\tWaited\tOwed\tPaid");
   S.order.map(function(id){ return S.players[id]; })
     .sort(function(a,b){ return a.name.localeCompare(b.name); })
     .forEach(function(p){
-      lines.push([p.name, lvOf(p).full, p.games, fmt(p.totalIdle+idleOf(p)),
-                  Math.round(p.games*m.rate), p.pay].join("\t"));
+      lines.push([p.name, lvOf(p).full, p.games, p.wins||0, p.losses||0,
+                  fmt(p.totalIdle+idleOf(p)), Math.round(p.games*m.rate), p.pay].join("\t"));
     });
   lines.push("");
   lines.push("Games played\t" + (S.gamesPlayed||0));
@@ -1088,6 +1204,7 @@ function wire(){
   $("btnArrivals").onclick = arrivalsModal;
   $("btnRoster").onclick = rosterModal;
   $("btnFinance").onclick = financeModal;
+  $("btnRanks").onclick = ranksModal;
   $("btnSummary").onclick = summaryModal;
   $("btnReset").onclick = function(){
     modal("Reset session", function(body, foot, close){
@@ -1099,7 +1216,7 @@ function wire(){
         S.courts.forEach(function(c){ c.slots=[null,null,null,null]; c.startedAt=null; });
         S.order.forEach(function(id){
           var p = S.players[id];
-          p.games=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null;
+          p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null;
         });
         close(); commit();
       };
@@ -1139,6 +1256,8 @@ load(function(saved){
       var p = S.players[id];
       if(!p.level) p.level = "lint";
       if(!p.status) p.status = "notyet";
+      if(typeof p.wins !== "number") p.wins = 0;
+      if(typeof p.losses !== "number") p.losses = 0;
     });
     uid = max;
   } else {
