@@ -155,6 +155,10 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .rbar{height:100%;background:linear-gradient(90deg,#5A7A9E,var(--accent))}
 .rrec{font-size:17px;font-weight:600;width:42px;text-align:right;flex-shrink:0}
 .rpct{font-size:14px;color:var(--muted);width:38px;text-align:right;flex-shrink:0}
+.syncdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;
+  vertical-align:middle}
+.cfgbox{width:100%;height:150px;background:#05070A;color:var(--chalk);border:1px solid var(--line);
+  border-radius:3px;padding:9px;font-family:ui-monospace,monospace;font-size:11px;resize:none}
 .sumbox{width:100%;height:260px;background:#05070A;color:var(--chalk);border:1px solid var(--line);
   border-radius:3px;padding:9px;font-family:ui-monospace,monospace;font-size:12px;resize:none}
 .note{color:var(--muted);font-size:13px;padding:8px 14px}
@@ -175,12 +179,14 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <div class="topstat">waiting <b id="statWait">0</b></div>
     <div class="topstat">games <b id="statGames">0</b></div>
     <div class="topstat">longest wait <b id="statLong">—</b></div>
+    <div class="topstat" id="syncBadge" style="display:none"></div>
     <div class="spacer"></div>
     <button class="link" id="btnArrivals">Arrivals</button>
     <button class="link" id="btnRoster">Roster</button>
     <button class="link" id="btnFinance">Finance</button>
     <button class="link" id="btnRanks">Rankings</button>
     <button class="link" id="btnSummary">Summary</button>
+    <button class="link" id="btnSync">Sync</button>
     <button class="link" id="btnReset">Reset</button>
   </div>
 
@@ -510,7 +516,7 @@ function leave(p){
   p.status = "out";
   p.benchSince = null;
 }
-function commit(){ save(); render(); }
+function commit(){ save(); pushSync(); render(); }
 
 /* ---------- render ---------- */
 function render(){
@@ -1171,6 +1177,160 @@ function summaryModal(){
   });
 }
 
+/* ---------- live sync (optional) ---------- */
+var SYNC_KEY = "badminton-sync-config-v1";
+var sync = {on:false, ref:null, me:null, status:"off", room:"", err:""};
+
+function myId(){
+  if(!sync.me){
+    sync.me = "d" + Math.random().toString(36).slice(2,8);
+  }
+  return sync.me;
+}
+function loadSyncConfig(){
+  try{
+    var raw = window.localStorage.getItem(SYNC_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function saveSyncConfig(cfg){
+  try{
+    if(cfg) window.localStorage.setItem(SYNC_KEY, JSON.stringify(cfg));
+    else window.localStorage.removeItem(SYNC_KEY);
+  }catch(e){}
+}
+function loadScript(src){
+  return new Promise(function(res, rej){
+    var t = document.createElement("script");
+    t.src = src; t.onload = res; t.onerror = function(){ rej(new Error("could not load " + src)); };
+    document.head.appendChild(t);
+  });
+}
+function setSyncStatus(st, err){
+  sync.status = st; sync.err = err || "";
+  var b = document.getElementById("syncBadge");
+  if(!b) return;
+  if(st === "off"){ b.style.display = "none"; return; }
+  b.style.display = "";
+  b.innerHTML = "";
+  var dot = document.createElement("span");
+  dot.className = "syncdot";
+  dot.style.background = st === "live" ? "#5FBF8A" : (st === "connecting" ? "#FFD23F" : "#D6323C");
+  b.appendChild(dot);
+  b.appendChild(document.createTextNode(
+    st === "live" ? ("live \u00b7 " + sync.room)
+    : st === "connecting" ? "connecting" : "sync error"));
+}
+function startSync(cfg){
+  if(!cfg || !cfg.config || !cfg.room) return;
+  setSyncStatus("connecting");
+  var base = "https://www.gstatic.com/firebasejs/10.12.2/";
+  var boot = (window.firebase && window.firebase.database)
+    ? Promise.resolve()
+    : loadScript(base + "firebase-app-compat.js").then(function(){
+        return loadScript(base + "firebase-database-compat.js");
+      });
+  boot.then(function(){
+    if(!window.firebase.apps || !window.firebase.apps.length){
+      window.firebase.initializeApp(cfg.config);
+    }
+    sync.room = cfg.room;
+    sync.ref = window.firebase.database().ref("rooms/" + cfg.room);
+    sync.on = true;
+    sync.ref.on("value", function(snap){
+      var v = snap.val();
+      if(!v){ pushSync(); setSyncStatus("live"); return; }
+      setSyncStatus("live");
+      if(v.by === myId()) return;              // our own echo
+      if(!v.blob) return;
+      try{
+        var incoming = JSON.parse(v.blob);
+        if(incoming && incoming.players && incoming.order){
+          S = incoming;
+          save();
+          render();
+        }
+      }catch(e){}
+    }, function(e){ setSyncStatus("error", e && e.message); });
+  }).catch(function(e){
+    sync.on = false;
+    setSyncStatus("error", e && e.message);
+  });
+}
+function stopSync(){
+  try{ if(sync.ref) sync.ref.off(); }catch(e){}
+  sync.ref = null; sync.on = false; sync.room = "";
+  setSyncStatus("off");
+}
+function pushSync(){
+  if(!sync.on || !sync.ref) return;
+  try{
+    sync.ref.set({blob: JSON.stringify(S), at: Date.now(), by: myId()});
+  }catch(e){}
+}
+
+function syncModal(){
+  modal("Live sync", function(body, foot, close){
+    var cfg = loadSyncConfig() || {room:"", config:null, raw:""};
+    body.appendChild(el("div","note",
+      "Two phones running the same queue. Both need the same Firebase details and the same room code."));
+
+    var f1 = el("div","field");
+    var room = document.createElement("input");
+    room.placeholder = "Room code, e.g. tuesday-night";
+    room.value = cfg.room || "";
+    f1.appendChild(room);
+    body.appendChild(f1);
+
+    body.appendChild(el("div","note","Paste the firebaseConfig object from your Firebase project:"));
+    var ta = document.createElement("textarea");
+    ta.className = "cfgbox";
+    ta.placeholder = '{ "apiKey": "...", "databaseURL": "https://...firebasedatabase.app", "projectId": "..." }';
+    ta.value = cfg.raw || "";
+    var wrap = el("div","field"); wrap.appendChild(ta);
+    body.appendChild(wrap);
+
+    var msg = el("div","note","");
+    body.appendChild(msg);
+    if(sync.status === "error" && sync.err) msg.textContent = "Last error: " + sync.err;
+    else if(sync.status === "live") msg.textContent = "Connected to room " + sync.room + ".";
+
+    var go = el("button","btn go", sync.on ? "Reconnect" : "Connect");
+    go.onclick = function(){
+      var r = room.value.trim().toLowerCase().replace(/[^a-z0-9-]+/g,"-");
+      if(!r){ msg.textContent = "Give the room a code first."; return; }
+      var parsed;
+      try{
+        var txt = ta.value.trim()
+          .replace(/^const\s+firebaseConfig\s*=\s*/,"")
+          .replace(/;\s*$/,"")
+          .replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g,'$1"$2":')
+          .replace(/'/g,'"');
+        parsed = JSON.parse(txt);
+      }catch(e){ msg.textContent = "That config did not parse. Paste the whole { ... } block."; return; }
+      if(!parsed.databaseURL){
+        msg.textContent = "No databaseURL in that config \u2014 make sure Realtime Database is turned on.";
+        return;
+      }
+      var out = {room:r, config:parsed, raw:ta.value.trim()};
+      saveSyncConfig(out);
+      stopSync();
+      startSync(out);
+      close();
+    };
+    foot.appendChild(go);
+
+    if(sync.on){
+      var off = el("button","btn danger","Disconnect");
+      off.onclick = function(){ stopSync(); close(); };
+      foot.appendChild(off);
+    }
+    var clear = el("button","btn ghost","Forget settings");
+    clear.onclick = function(){ saveSyncConfig(null); stopSync(); close(); };
+    foot.appendChild(clear);
+  });
+}
+
 /* ---------- modal shell ---------- */
 function modal(title, build){
   var veil = el("div","veil");
@@ -1206,6 +1366,7 @@ function wire(){
   $("btnFinance").onclick = financeModal;
   $("btnRanks").onclick = ranksModal;
   $("btnSummary").onclick = summaryModal;
+  $("btnSync").onclick = syncModal;
   $("btnReset").onclick = function(){
     modal("Reset session", function(body, foot, close){
       body.appendChild(el("div","note",
@@ -1265,6 +1426,8 @@ load(function(saved){
   }
   wire(); render();
   setInterval(tick, 1000);
+  var sc = loadSyncConfig();
+  if(sc && sc.room && sc.config) startSync(sc);
 });
 
 })();
