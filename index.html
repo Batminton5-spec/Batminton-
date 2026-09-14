@@ -163,6 +163,20 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .dchip{display:flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid transparent;
   border-radius:3px;padding:5px 8px;font:inherit;color:inherit;cursor:pointer;font-size:14px;font-weight:600}
 .dchip:hover{border-color:var(--hot)}
+.pbtn{background:transparent;border:1px solid var(--line);border-radius:2px;cursor:pointer;
+  padding:3px 5px;display:flex;align-items:center;gap:2px;flex-shrink:0}
+.pbtn:hover{border-color:var(--accent)}
+.pbtn i{display:block;width:2px;height:9px;background:var(--muted)}
+.pbtn:hover i{background:var(--accent)}
+.pbtn.play i{width:0;height:0;background:transparent;border-left:7px solid var(--accent);
+  border-top:5px solid transparent;border-bottom:5px solid transparent}
+.pausedhead{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:600;
+  padding:9px 13px 3px;border-top:1px solid var(--line)}
+.prow{display:flex;align-items:center;gap:8px;padding:6px 13px;opacity:.6}
+.prow .pn2{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .pw{font-family:'Barlow Condensed',sans-serif;font-size:15px;color:var(--muted)}
+.dchip.playing{border-color:rgba(214,50,60,.55);color:var(--hot)}
+.dchip.playing .lv{opacity:.75}
 .dchip.add{background:transparent;border:1px dashed var(--line);color:var(--muted);font-weight:400}
 .dchip.add:hover{border-color:var(--accent);color:var(--chalk)}
 .dvs{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;padding:0 2px}
@@ -230,10 +244,12 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
       <div class="panel money">
         <div class="phead">
           <div class="ptitle">Up next</div>
-          <div class="pcount">line up the next matches</div>
+          <div class="pcount" id="draftCount">line up the next matches</div>
           <div class="spacer"></div>
           <button class="btn sm" id="btnAutoDraft">Auto-fill all</button>
           <button class="btn sm" id="btnClearDrafts">Clear</button>
+          <button class="btn sm" id="btnMinusDraft">−</button>
+          <button class="btn sm" id="btnPlusDraft">+</button>
         </div>
         <div id="drafts"></div>
       </div>
@@ -357,7 +373,7 @@ function freshState(){
   SEED.forEach(function(p){
     var id = "p" + (uid++);
     players[id] = {id:id, name:p[0], level:p[1], status:"notyet",
-                   games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid"};
+                   games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false};
     order.push(id);
   });
   return {
@@ -434,7 +450,7 @@ function fmt(sec){
 }
 function peso(n){ return "\u20B1" + Math.round(n).toLocaleString("en-US"); }
 function idleOf(p){
-  if(p.status !== "in" || !p.benchSince) return 0;
+  if(p.status !== "in" || p.paused || !p.benchSince) return 0;
   return (Date.now() - p.benchSince) / 1000;
 }
 function onCourt(pid){
@@ -455,7 +471,7 @@ function benchList(){
   var out = [];
   S.order.forEach(function(id){
     var p = S.players[id];
-    if(p.status === "in" && !onCourt(id)) out.push(p);
+    if(p.status === "in" && !isPaused(p) && !onCourt(id)) out.push(p);
   });
   if(S.sort === "games") out.sort(function(a,b){ return (a.games-b.games) || (a.benchSince-b.benchSince); });
   else out.sort(function(a,b){ return a.benchSince - b.benchSince; });
@@ -472,6 +488,46 @@ function unDraft(pid){
     var i = d.indexOf(pid);
     if(i !== -1) d[i] = null;
   });
+}
+function isPaused(p){ return !!p.paused; }
+function pausePlayer(p){
+  var c = onCourt(p.id);
+  if(c) c.slots[c.slots.indexOf(p.id)] = null;
+  unDraft(p.id);
+  p.totalIdle += idleOf(p);
+  p.paused = true;
+  p.benchSince = null;
+}
+function resumePlayer(p){
+  p.paused = false;
+  p.benchSince = Date.now();
+}
+function pausedCount(){
+  var n = 0;
+  S.order.forEach(function(id){
+    var p = S.players[id];
+    if(p.status === "in" && isPaused(p)) n++;
+  });
+  return n;
+}
+function pausedList(){
+  return S.order.map(function(id){ return S.players[id]; })
+    .filter(function(p){ return p.status === "in" && isPaused(p); })
+    .sort(function(a,b){ return a.name.localeCompare(b.name); });
+}
+function onCourtPool(){
+  var out = [];
+  S.courts.forEach(function(c){
+    c.slots.forEach(function(id){
+      if(id && S.players[id] && draftOf(id) === -1) out.push(S.players[id]);
+    });
+  });
+  // least priority: fewest games first, then name
+  return out.sort(function(a,b){ return a.games - b.games || a.name.localeCompare(b.name); });
+}
+function draftHasPlayers(d){ return d.filter(Boolean).length; }
+function draftStillPlaying(d){
+  return d.filter(Boolean).some(function(id){ return !!onCourt(id); });
 }
 function availableList(){
   return benchList().filter(function(p){ return draftOf(p.id) === -1; });
@@ -533,7 +589,12 @@ function sampleN(arr, n){
 function smartPick(need, fixed){
   fixed = (fixed || []).filter(Boolean);
   var pool = availableList();                 // already ordered longest wait first
-  if(pool.length <= need) return pool.map(function(p){ return p.id; });
+  if(pool.length < need){
+    // bench cannot fill it: top up with players still on court, lowest priority
+    var topUp = onCourtPool().slice(0, need - pool.length);
+    return pool.concat(topUp).map(function(p){ return p.id; });
+  }
+  if(pool.length === need) return pool.map(function(p){ return p.id; });
 
   var edge = idleOf(pool[Math.min(need, pool.length) - 1]) - IDLE_TOLERANCE;
   var cands = pool.filter(function(p){ return idleOf(p) >= edge; });
@@ -560,18 +621,29 @@ function money(){
   var c = S.cost;
   var total = (c.cQty||0)*(c.cHrs||0)*(c.cRate||0) + (c.sQty||0)*(c.sPrice||0)
             + (c.xTrans||0) + (c.xMisc||0);
-  var slots = 0;
-  S.order.forEach(function(id){ slots += S.players[id].games; });
+  var slots = 0, freeSlots = 0, freeHeads = 0;
+  S.order.forEach(function(id){
+    var p = S.players[id];
+    if(p.exempt){
+      freeSlots += p.games;
+      if(p.games > 0) freeHeads++;
+    } else {
+      slots += p.games;
+    }
+  });
   var computed = slots > 0 ? total/slots : 0;
   var fixed = (S.rateOverride === null || S.rateOverride === undefined) ? null : Number(S.rateOverride);
   var rate = (fixed !== null && !isNaN(fixed)) ? fixed : computed;
   var paid = 0, unpaid = 0;
   S.order.forEach(function(id){
-    var p = S.players[id], owe = p.games*rate;
+    var p = S.players[id];
+    if(p.exempt) return;
+    var owe = p.games*rate;
     if(p.pay === "unpaid") unpaid += owe; else paid += owe;
   });
   var expected = slots * rate;
   return {total:total, rate:rate, computed:computed, fixed:fixed, slots:slots,
+          freeSlots:freeSlots, freeHeads:freeHeads,
           paid:paid, unpaid:unpaid, expected:expected, gap:expected - total};
 }
 
@@ -622,6 +694,7 @@ function pullFromCourt(court, i){
 }
 function arrive(p){
   p.status = "in";
+  p.paused = false;
   p.benchSince = Date.now();
 }
 function leave(p){
@@ -730,6 +803,8 @@ function render(){
         b.appendChild(chip(p));
         b.appendChild(el("div","snm",p.name));
         b.appendChild(el("div","sgm num",p.games));
+        var dhold = draftOf(id);
+        if(dhold !== -1) b.appendChild(el("span","btag","N" + (dhold+1)));
         b.onclick = function(){ pullFromCourt(court,i); };
         b.title = "Tap to send " + p.name + " back to the bench";
       } else {
@@ -745,7 +820,8 @@ function render(){
 
   // bench
   var bw = $("bench"); bw.innerHTML = "";
-  $("benchCount").textContent = bench.length + " waiting";
+  $("benchCount").textContent = bench.length + " waiting"
+    + (pausedCount() ? (" \u00b7 " + pausedCount() + " paused") : "");
   $("btnSort").textContent = S.sort === "wait" ? "Longest wait" : "Fewest games";
   if(!bench.length) bw.appendChild(el("div","empty-note","Empty bench."));
   bench.forEach(function(p){
@@ -760,6 +836,19 @@ function render(){
     t.setAttribute("data-since",p.benchSince); t.setAttribute("data-kind","time");
     r.appendChild(t);
     r.appendChild(el("div","bgm num",p.games));
+
+    var pz = document.createElement("button");
+    pz.className = "pbtn";
+    pz.appendChild(document.createElement("i"));
+    pz.appendChild(document.createElement("i"));
+    pz.title = "Pause " + p.name + " \u2014 sitting out for a bit";
+    pz.onclick = function(e){
+      if(e && e.stopPropagation) e.stopPropagation();
+      pausePlayer(p);
+      commit();
+    };
+    r.appendChild(pz);
+
     var di = draftOf(p.id);
     if(di !== -1){
       r.appendChild(el("div","btag","N" + (di+1)));
@@ -776,6 +865,8 @@ function render(){
 
   // up next drafts
   var dw = $("drafts"); dw.innerHTML = "";
+  $("draftCount").textContent = S.drafts.length
+    + (S.drafts.length === 1 ? " lineup" : " lineups");
   S.drafts.forEach(function(d, di){
     var box = el("div","draft");
     var head = el("div","dhead");
@@ -805,8 +896,11 @@ function render(){
     }
     if(need === 0){
       var target = openCourtFor(4);
-      var sb = el("button","btn sm go", target ? ("Send to court " + target.n) : "No open court");
-      sb.disabled = !target;
+      var waiting = draftStillPlaying(d);
+      var sb = el("button","btn sm go",
+        waiting ? "Still playing" : (target ? ("Send to court " + target.n) : "No open court"));
+      sb.disabled = !target || waiting;
+      if(waiting) sb.title = "Someone in this lineup is still on a court";
       sb.onclick = function(){
         var ids = d.slice();
         S.drafts[di] = [null,null,null,null];
@@ -823,10 +917,13 @@ function render(){
       var b = document.createElement("button");
       if(id && S.players[id]){
         var p = S.players[id];
-        b.className = "dchip";
+        var busy = onCourt(id);
+        b.className = busy ? "dchip playing" : "dchip";
         b.appendChild(chip(p));
         b.appendChild(el("span","",p.name));
-        b.title = "Tap to take " + p.name + " out";
+        b.title = busy
+          ? p.name + " is still on court " + busy.n + " \u2014 tap to take them out"
+          : "Tap to take " + p.name + " out";
         b.onclick = function(){ d[i] = null; commit(); };
       } else {
         b.className = "dchip add";
@@ -838,6 +935,25 @@ function render(){
     box.appendChild(row);
     dw.appendChild(box);
   });
+
+  var paused = pausedList();
+  if(paused.length){
+    var ph = el("div","pausedhead","Paused \u2014 " + paused.length);
+    bw.appendChild(ph);
+    paused.forEach(function(p){
+      var r = el("div","prow");
+      r.appendChild(chip(p));
+      r.appendChild(el("div","pn2",p.name));
+      r.appendChild(el("div","pw num", p.games + "g"));
+      var pl = document.createElement("button");
+      pl.className = "pbtn play";
+      pl.appendChild(document.createElement("i"));
+      pl.title = "Put " + p.name + " back on the bench";
+      pl.onclick = function(){ resumePlayer(p); commit(); };
+      r.appendChild(pl);
+      bw.appendChild(r);
+    });
+  }
 
   // money + tally
   var m = money();
@@ -853,14 +969,23 @@ function render(){
       r.appendChild(chip(p));
       r.appendChild(el("div","tn",p.name));
       r.appendChild(el("div","tg num",p.games+"g"));
-      r.appendChild(el("div","tc num",peso(p.games*m.rate)));
-      var pb = el("button","pay " + (p.pay==="unpaid"?"":p.pay),
-        p.pay==="unpaid"?"unpaid":(p.pay==="gcash"?"GCash":"cash"));
-      pb.onclick = function(){
-        p.pay = p.pay==="unpaid"?"gcash":(p.pay==="gcash"?"cash":"unpaid");
-        commit();
-      };
-      r.appendChild(pb);
+      r.appendChild(el("div","tc num", p.exempt ? "\u2014" : peso(p.games*m.rate)));
+      if(p.exempt){
+        var fb2 = el("div","pay","QM");
+        fb2.style.color = "var(--accent)";
+        fb2.style.borderColor = "rgba(255,210,63,.4)";
+        fb2.style.textAlign = "center";
+        r.appendChild(fb2);
+        r.style.opacity = ".72";
+      } else {
+        var pb = el("button","pay " + (p.pay==="unpaid"?"":p.pay),
+          p.pay==="unpaid"?"unpaid":(p.pay==="gcash"?"GCash":"cash"));
+        pb.onclick = function(){
+          p.pay = p.pay==="unpaid"?"gcash":(p.pay==="gcash"?"cash":"unpaid");
+          commit();
+        };
+        r.appendChild(pb);
+      }
       tw.appendChild(r);
     });
 
@@ -920,27 +1045,42 @@ function pickerFor(court, slotIdx){
 
 function draftPicker(di, slotIdx){
   var pool = availableList();
+  var busy = onCourtPool();
   modal("Next " + (di+1) + " \u2014 pick a player", function(body, foot, close){
-    if(!pool.length){
-      body.appendChild(el("div","note","Everyone waiting is already lined up or on a court."));
+    if(!pool.length && !busy.length){
+      body.appendChild(el("div","note","Everyone is already lined up."));
       return;
     }
-    pool.forEach(function(p){
+
+    function addRow(p, playing){
       var b = document.createElement("button");
       b.className = "pick";
       b.appendChild(chip(p));
-      b.appendChild(el("div","pn",p.name));
-      var g = el("div","pg num", p.games + "g");
-      b.appendChild(g);
+      var nm = el("div","pn",p.name);
+      if(playing) nm.style.color = "var(--hot)";
+      b.appendChild(nm);
+      b.appendChild(el("div","pg num", p.games + "g"));
       var trial = S.drafts[di].slice(); trial[slotIdx] = p.id;
       var v = rateMatch(trial);
       if(v) b.appendChild(verdictChip(v));
-      var t = el("div","pt num",fmt(idleOf(p)));
-      t.style.color = heat(idleOf(p));
+      var t = el("div","pt num", playing ? "on court" : fmt(idleOf(p)));
+      t.style.color = playing ? "var(--hot)" : heat(idleOf(p));
+      if(playing) t.style.fontSize = "14px";
       b.appendChild(t);
       b.onclick = function(){ S.drafts[di][slotIdx] = p.id; close(); commit(); };
       body.appendChild(b);
-    });
+    }
+
+    if(pool.length){
+      body.appendChild(el("div","sechead","On the bench"));
+      pool.forEach(function(p){ addRow(p, false); });
+    }
+    if(busy.length){
+      body.appendChild(el("div","sechead","Still playing"));
+      body.appendChild(el("div","note",
+        "You can line these up now, but the draft cannot be sent until their game ends."));
+      busy.forEach(function(p){ addRow(p, true); });
+    }
   });
 }
 
@@ -975,6 +1115,12 @@ function arrivalsModal(){
         var r = el("div","rrow");
         r.appendChild(chip(p));
         r.appendChild(el("div","rn",p.name));
+        var pb2 = el("button","btn sm ghost", isPaused(p) ? "Resume" : "Pause");
+        pb2.onclick = function(){
+          if(isPaused(p)) resumePlayer(p); else pausePlayer(p);
+          close(); commit(); arrivalsModal();
+        };
+        r.appendChild(pb2);
         var b = el("button","btn sm ghost","Left");
         b.onclick = function(){ leave(p); close(); commit(); arrivalsModal(); };
         r.appendChild(b);
@@ -1026,7 +1172,7 @@ function rosterModal(){
       if(!nm) return;
       var id = "p" + (uid++);
       S.players[id] = {id:id, name:nm, level:sel.value, status:"notyet",
-                       games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid"};
+                       games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false};
       S.order.push(id);
       close(); commit(); rosterModal();
     }
@@ -1057,6 +1203,13 @@ function rosterModal(){
         wt.style.textAlign = "right";
         wt.title = "Total time off court today";
         r.appendChild(wt);
+        var fx = el("button", p.exempt ? "btn sm go" : "btn sm ghost", "QM");
+        fx.title = p.exempt
+          ? p.name + " is a queue master and pays nothing \u2014 tap to charge them again"
+          : "Mark " + p.name + " as a queue master who does not pay";
+        fx.onclick = function(){ p.exempt = !p.exempt; save(); render(); close(); rosterModal(); };
+        r.appendChild(fx);
+
         var rm = el("button","btn sm danger","\u00d7");
         rm.title = "Remove " + p.name;
         rm.onclick = function(){
@@ -1142,7 +1295,7 @@ function financeModal(){
 
     var markAll = el("button","btn","Mark filtered as GCash");
     markAll.onclick = function(){
-      rows().forEach(function(p){ p.pay = "gcash"; });
+      rows().forEach(function(p){ if(!p.exempt) p.pay = "gcash"; });
       save(); render(); refresh();
     };
     foot.appendChild(markAll);
@@ -1157,7 +1310,7 @@ function financeModal(){
 
     function rows(){
       var out = S.order.map(function(id){ return S.players[id]; })
-        .filter(function(p){ return p.games > 0; });
+        .filter(function(p){ return p.games > 0 && !p.exempt; });
       if(finFilter === "paid") out = out.filter(function(p){ return p.pay !== "unpaid"; });
       if(finFilter === "unpaid") out = out.filter(function(p){ return p.pay === "unpaid"; });
       return out.sort(function(a,b){ return b.games - a.games || a.name.localeCompare(b.name); });
@@ -1173,7 +1326,13 @@ function financeModal(){
       hint.textContent = (m.fixed !== null && !isNaN(m.fixed))
         ? ("Charging a flat " + peso(m.fixed) + " a game. Splitting actual expenses would be "
            + peso(m.computed) + ".")
-        : ("Splitting actual expenses across " + m.slots + " player-games. Type an amount above to charge a flat rate instead.");
+        : ("Splitting actual expenses across " + m.slots + " paying player-games. Type an amount above to charge a flat rate instead.");
+      if(m.freeHeads){
+        hint.textContent += " " + m.freeHeads
+          + (m.freeHeads === 1 ? " queue master" : " queue masters")
+          + " (" + m.freeSlots + (m.freeSlots === 1 ? " game" : " games")
+          + ") pay nothing, so the rest cover their share.";
+      }
 
       if(m.slots === 0){
         gapNote.textContent = "No games finished yet.";
@@ -1200,15 +1359,21 @@ function financeModal(){
       }
       var subtotal = 0;
       rs.forEach(function(p){
-        var owe = p.games * m.rate;
+        var owe = p.exempt ? 0 : p.games * m.rate;
         subtotal += owe;
         var r = el("div","trow");
+        if(p.exempt) r.style.opacity = ".72";
         r.appendChild(el("div","tn",p.name));
         r.appendChild(el("div","tg num",p.games + "g"));
-        r.appendChild(el("div","tc num",peso(owe)));
-        var pb = el("button","pay " + (p.pay === "unpaid" ? "" : p.pay),
-          p.pay === "unpaid" ? "unpaid" : (p.pay === "gcash" ? "GCash" : "cash"));
+        r.appendChild(el("div","tc num", p.exempt ? "\u2014" : peso(owe)));
+        var pb = el("button","pay " + (p.exempt ? "" : (p.pay === "unpaid" ? "" : p.pay)),
+          p.exempt ? "free" : (p.pay === "unpaid" ? "unpaid" : (p.pay === "gcash" ? "GCash" : "cash")));
+        if(p.exempt){
+          pb.style.color = "var(--accent)";
+          pb.style.borderColor = "rgba(255,210,63,.4)";
+        }
         pb.onclick = function(){
+          if(p.exempt) return;
           p.pay = p.pay === "unpaid" ? "gcash" : (p.pay === "gcash" ? "cash" : "unpaid");
           save(); render(); refresh();
         };
@@ -1331,7 +1496,9 @@ function summaryModal(){
     .sort(function(a,b){ return a.name.localeCompare(b.name); })
     .forEach(function(p){
       lines.push([p.name, lvOf(p).full, p.games, p.wins||0, p.losses||0,
-                  fmt(p.totalIdle+idleOf(p)), Math.round(p.games*m.rate), p.pay].join("\t"));
+                  fmt(p.totalIdle+idleOf(p)),
+                  p.exempt ? 0 : Math.round(p.games*m.rate),
+                  p.exempt ? "QM" : p.pay].join("\t"));
     });
   lines.push("");
   lines.push("Games played\t" + (S.gamesPlayed||0));
@@ -1586,8 +1753,18 @@ function wire(){
     });
     commit();
   };
+  $("btnPlusDraft").onclick = function(){
+    if(S.drafts.length >= 6) return;
+    S.drafts.push([null,null,null,null]);
+    commit();
+  };
+  $("btnMinusDraft").onclick = function(){
+    if(S.drafts.length <= 1) return;
+    S.drafts.pop();
+    commit();
+  };
   $("btnClearDrafts").onclick = function(){
-    S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
+    S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
     commit();
   };
   $("btnArrivals").onclick = arrivalsModal;
@@ -1604,11 +1781,11 @@ function wire(){
       soft.onclick = function(){
         S.startedAt = Date.now(); S.gamesPlayed = 0;
         S.courts.forEach(function(c){ c.slots=[null,null,null,null]; c.startedAt=null; });
-        S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
+        S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
         S.met = {};
         S.order.forEach(function(id){
           var p = S.players[id];
-          p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null;
+          p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null; p.paused=false;
         });
         close(); commit();
       };
@@ -1649,6 +1826,8 @@ load(function(saved){
       if(!p.level) p.level = "lint";
       if(!p.status) p.status = "notyet";
       if(typeof p.wins !== "number") p.wins = 0;
+      if(typeof p.paused !== "boolean") p.paused = false;
+      if(typeof p.exempt !== "boolean") p.exempt = false;
       if(typeof p.losses !== "number") p.losses = 0;
     });
     uid = max;
