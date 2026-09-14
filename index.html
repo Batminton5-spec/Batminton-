@@ -220,9 +220,10 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
   <div class="hero">
     <div class="hero-head">
       <div class="hero-title">Next on</div>
-      <div class="hero-sub">longest off the court</div>
+      <div class="hero-sub" id="heroSub">longest off the court</div>
       <div class="spacer"></div>
       <span id="nextVerdict"></span>
+      <button class="btn sm" id="btnHeroSort">Longest wait</button>
       <button class="btn go" id="btnSend">Send to court</button>
     </div>
     <div class="nextrow" id="nextRow"></div>
@@ -732,19 +733,35 @@ function render(){
                       : "Nobody on the bench. Everyone is playing."));
   }
   var free = availableList();
+  var byGames = S.sort === "games";
+  $("heroSub").textContent = byGames ? "fewest games played" : "longest off the court";
+  $("btnHeroSort").textContent = byGames ? "Fewest games" : "Longest wait";
+
   var nextFour = free.slice(0,4);
   nextFour.forEach(function(p){
     var card = el("div","nextcard");
     card.style.borderLeftColor = heat(idleOf(p));
-    var top = el("div","nm",p.name);
-    card.appendChild(top);
-    var t = el("div","tm num",fmt(idleOf(p)));
-    t.setAttribute("data-since",p.benchSince); t.setAttribute("data-kind","time");
-    card.appendChild(t);
-    var foot = el("div","gm");
-    foot.appendChild(chip(p));
-    foot.appendChild(document.createTextNode(" " + p.games + (p.games===1?" game":" games")));
-    card.appendChild(foot);
+    card.appendChild(el("div","nm",p.name));
+
+    if(byGames){
+      card.appendChild(el("div","tm num", p.games));
+      var foot2 = el("div","gm");
+      foot2.appendChild(chip(p));
+      var w = document.createElement("span");
+      w.textContent = " " + fmt(idleOf(p)) + " waiting";
+      w.setAttribute("data-since", p.benchSince);
+      w.setAttribute("data-kind", "timesuffix");
+      foot2.appendChild(w);
+      card.appendChild(foot2);
+    } else {
+      var t = el("div","tm num",fmt(idleOf(p)));
+      t.setAttribute("data-since",p.benchSince); t.setAttribute("data-kind","time");
+      card.appendChild(t);
+      var foot = el("div","gm");
+      foot.appendChild(chip(p));
+      foot.appendChild(document.createTextNode(" " + p.games + (p.games===1?" game":" games")));
+      card.appendChild(foot);
+    }
     nr.appendChild(card);
   });
   var nv = $("nextVerdict"); nv.innerHTML = "";
@@ -1006,7 +1023,9 @@ function tick(){
     var since = parseInt(n.getAttribute("data-since"),10);
     if(!since) return;
     var sec = (now - since)/1000;
-    if(n.getAttribute("data-kind") === "time") n.textContent = fmt(sec);
+    var kind = n.getAttribute("data-kind");
+    if(kind === "time") n.textContent = fmt(sec);
+    else if(kind === "timesuffix") n.textContent = " " + fmt(sec) + " waiting";
     else { n.style.width = Math.min(100,(sec/HEAT_FULL)*100)+"%"; n.style.background = heat(sec); }
   });
   var b = benchList();
@@ -1740,7 +1759,9 @@ function wire(){
     if(!court) return;
     sendToCourt(court, availableList().slice(0,4).map(function(p){ return p.id; }));
   };
-  $("btnSort").onclick = function(){ S.sort = S.sort==="wait"?"games":"wait"; commit(); };
+  function flipSort(){ S.sort = S.sort === "wait" ? "games" : "wait"; commit(); }
+  $("btnSort").onclick = flipSort;
+  $("btnHeroSort").onclick = flipSort;
   $("btnAutoDraft").onclick = function(){
     S.drafts.forEach(function(d, di){
       var need = d.filter(function(x){ return x === null; }).length;
