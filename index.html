@@ -155,6 +155,19 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .rbar{height:100%;background:linear-gradient(90deg,#5A7A9E,var(--accent))}
 .rrec{font-size:17px;font-weight:600;width:42px;text-align:right;flex-shrink:0}
 .rpct{font-size:14px;color:var(--muted);width:38px;text-align:right;flex-shrink:0}
+.draft{border-bottom:1px solid var(--line);padding:10px 13px}
+.draft:last-child{border-bottom:none}
+.dhead{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
+.dname{font-family:'Barlow Condensed',sans-serif;font-weight:600;font-size:16px;color:var(--muted)}
+.dslots{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.dchip{display:flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid transparent;
+  border-radius:3px;padding:5px 8px;font:inherit;color:inherit;cursor:pointer;font-size:14px;font-weight:600}
+.dchip:hover{border-color:var(--hot)}
+.dchip.add{background:transparent;border:1px dashed var(--line);color:var(--muted);font-weight:400}
+.dchip.add:hover{border-color:var(--accent);color:var(--chalk)}
+.dvs{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;padding:0 2px}
+.btag{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:600;color:var(--accent);
+  border:1px solid rgba(255,210,63,.4);border-radius:2px;padding:0 4px;flex-shrink:0}
 .syncdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;
   vertical-align:middle}
 .cfgbox{width:100%;height:150px;background:#05070A;color:var(--chalk);border:1px solid var(--line);
@@ -212,6 +225,17 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
           <button class="btn sm" id="btnPlusCourt">+</button>
         </div>
         <div id="courts"></div>
+      </div>
+
+      <div class="panel money">
+        <div class="phead">
+          <div class="ptitle">Up next</div>
+          <div class="pcount">line up the next matches</div>
+          <div class="spacer"></div>
+          <button class="btn sm" id="btnAutoDraft">Auto-fill all</button>
+          <button class="btn sm" id="btnClearDrafts">Clear</button>
+        </div>
+        <div id="drafts"></div>
       </div>
 
       <div class="panel money">
@@ -338,6 +362,7 @@ function freshState(){
   });
   return {
     name:"Game #86", startedAt:Date.now(), gamesPlayed:0, rateOverride:null,
+    drafts:[[null,null,null,null],[null,null,null,null],[null,null,null,null]], met:{},
     courts:[mkCourt(1), mkCourt(2), mkCourt(3)],
     players:players, order:order, sort:"wait",
     cost:{cQty:3, cHrs:4, cRate:450, sQty:24, sPrice:80, xTrans:500, xMisc:1650}
@@ -436,10 +461,98 @@ function benchList(){
   else out.sort(function(a,b){ return a.benchSince - b.benchSince; });
   return out;
 }
+function draftOf(pid){
+  for(var i=0;i<S.drafts.length;i++){
+    if(S.drafts[i].indexOf(pid) !== -1) return i;
+  }
+  return -1;
+}
+function unDraft(pid){
+  S.drafts.forEach(function(d){
+    var i = d.indexOf(pid);
+    if(i !== -1) d[i] = null;
+  });
+}
+function availableList(){
+  return benchList().filter(function(p){ return draftOf(p.id) === -1; });
+}
+function openCourtFor(count){
+  return S.courts.find(function(c){
+    return c.slots.filter(function(x){ return x === null; }).length >= count;
+  });
+}
 function countBy(status){
   var n = 0;
   S.order.forEach(function(id){ if(S.players[id].status === status) n++; });
   return n;
+}
+
+
+/* ---------- fair, varied auto-pick ---------- */
+var IDLE_TOLERANCE = 240;   // seconds: waits within 4 minutes count as equal
+
+function pairKey(a,b){ return a < b ? a + "|" + b : b + "|" + a; }
+function recordMeeting(ids){
+  var list = ids.filter(Boolean);
+  if(!S.met) S.met = {};
+  for(var i=0;i<list.length;i++){
+    for(var j=i+1;j<list.length;j++){
+      var k = pairKey(list[i], list[j]);
+      S.met[k] = (S.met[k] || 0) + 1;
+    }
+  }
+}
+function repeatPenalty(ids){
+  if(!S.met) return 0;
+  var list = ids.filter(Boolean), n = 0;
+  for(var i=0;i<list.length;i++){
+    for(var j=i+1;j<list.length;j++){
+      n += S.met[pairKey(list[i], list[j])] || 0;
+    }
+  }
+  return n;
+}
+function verdictScore(v){
+  if(!v) return 0;
+  if(v === VERDICTS.good) return 30;
+  if(v === VERDICTS.balanced) return 26;
+  if(v === VERDICTS.notbad) return 18;
+  if(v === VERDICTS.unbalanced) return -25;
+  return -70;
+}
+function sampleN(arr, n){
+  var c = arr.slice();
+  for(var i=c.length-1;i>0;i--){
+    var j = Math.floor(Math.random()*(i+1));
+    var t = c[i]; c[i] = c[j]; c[j] = t;
+  }
+  return c.slice(0, n);
+}
+// picks `need` players from the bench: random within the tolerance window,
+// weighted towards balanced matches and away from repeat pairings
+function smartPick(need, fixed){
+  fixed = (fixed || []).filter(Boolean);
+  var pool = availableList();                 // already ordered longest wait first
+  if(pool.length <= need) return pool.map(function(p){ return p.id; });
+
+  var edge = idleOf(pool[Math.min(need, pool.length) - 1]) - IDLE_TOLERANCE;
+  var cands = pool.filter(function(p){ return idleOf(p) >= edge; });
+  if(cands.length < need) cands = pool.slice(0, need);
+  if(cands.length === need) return cands.map(function(p){ return p.id; });
+
+  var best = null, bestScore = -Infinity;
+  var tries = Math.min(800, 80 * cands.length);
+  for(var t=0;t<tries;t++){
+    var pick = sampleN(cands, need);
+    var ids = fixed.concat(pick.map(function(p){ return p.id; }));
+    var sc = 0;
+    if(ids.length === 4) sc += verdictScore(rateMatch(bestSplit(ids)));
+    sc -= repeatPenalty(ids) * 9;
+    var waited = pick.reduce(function(a,p){ return a + idleOf(p); }, 0);
+    sc += (waited / 60) * 0.4;                // mild nudge towards longer waits
+    if(sc > bestScore){ bestScore = sc; best = pick; }
+  }
+  return best.map(function(p){ return p.id; });
 }
 
 /* ---------- money ---------- */
@@ -465,6 +578,7 @@ function money(){
 /* ---------- actions ---------- */
 function placeOnCourt(court, pid, slotIdx){
   var p = S.players[pid];
+  unDraft(pid);
   p.totalIdle += idleOf(p);
   p.benchSince = null;
   court.slots[slotIdx] = pid;
@@ -492,6 +606,7 @@ function endGame(court, winner){
       else p.losses = (p.losses||0) + 1;
     }
   });
+  recordMeeting(court.slots);
   court.slots = [null,null,null,null];
   court.startedAt = null;
   S.gamesPlayed = (S.gamesPlayed||0) + 1;
@@ -512,6 +627,7 @@ function arrive(p){
 function leave(p){
   var c = onCourt(p.id);
   if(c) c.slots[c.slots.indexOf(p.id)] = null;
+  unDraft(p.id);
   p.totalIdle += idleOf(p);
   p.status = "out";
   p.benchSince = null;
@@ -542,7 +658,8 @@ function render(){
       waitingToArrive ? "Nobody on the bench yet. Mark people arrived under Arrivals."
                       : "Nobody on the bench. Everyone is playing."));
   }
-  var nextFour = bench.slice(0,4);
+  var free = availableList();
+  var nextFour = free.slice(0,4);
   nextFour.forEach(function(p){
     var card = el("div","nextcard");
     card.style.borderLeftColor = heat(idleOf(p));
@@ -562,10 +679,8 @@ function render(){
     var v = rateMatch(nextFour.map(function(p){ return p.id; }));
     if(v) nv.appendChild(verdictChip(v));
   }
-  var openCourt = S.courts.find(function(c){
-    return c.slots.filter(function(x){ return x===null; }).length >= 4;
-  });
-  $("btnSend").disabled = !(openCourt && bench.length >= 4);
+  var openCourt = openCourtFor(4);
+  $("btnSend").disabled = !(openCourt && free.length >= 4);
   $("btnSend").textContent = openCourt ? ("Send to court " + openCourt.n) : "No open court";
 
   // courts
@@ -596,10 +711,10 @@ function render(){
       };
       row.appendChild(eb);
     }
-    if(filled < 4 && bench.length){
+    if(filled < 4 && availableList().length){
       var fb = el("button","btn sm","Fill");
       fb.onclick = function(){
-        sendToCourt(court, benchList().slice(0, 4-filled).map(function(p){ return p.id; }));
+        sendToCourt(court, smartPick(4 - filled, court.slots.filter(Boolean)));
       };
       row.appendChild(fb);
     }
@@ -645,9 +760,83 @@ function render(){
     t.setAttribute("data-since",p.benchSince); t.setAttribute("data-kind","time");
     r.appendChild(t);
     r.appendChild(el("div","bgm num",p.games));
-    r.onclick = function(){ quickSend(p.id); };
-    r.title = "Tap to put " + p.name + " on the next open slot";
+    var di = draftOf(p.id);
+    if(di !== -1){
+      r.appendChild(el("div","btag","N" + (di+1)));
+      r.style.opacity = ".62";
+      r.title = p.name + " is lined up in Next " + (di+1);
+      r.onclick = function(){ unDraft(p.id); commit(); };
+    } else {
+      r.onclick = function(){ quickSend(p.id); };
+      r.title = "Tap to put " + p.name + " on the next open slot";
+    }
     bw.appendChild(r);
+  });
+
+
+  // up next drafts
+  var dw = $("drafts"); dw.innerHTML = "";
+  S.drafts.forEach(function(d, di){
+    var box = el("div","draft");
+    var head = el("div","dhead");
+    head.appendChild(el("div","dname","Next " + (di+1)));
+    var v = rateMatch(d);
+    if(v) head.appendChild(verdictChip(v));
+    head.appendChild(el("div","spacer"));
+
+    var need = d.filter(function(x){ return x === null; }).length;
+    if(need > 0 && availableList().length){
+      var ab = el("button","btn sm","Auto");
+      ab.title = "Fill with the longest waiting";
+      ab.onclick = function(){
+        var picks = smartPick(need, d.filter(Boolean));
+        for(var i=0;i<d.length && picks.length;i++){
+          if(d[i] === null) d[i] = picks.shift();
+        }
+        if(d.filter(Boolean).length === 4) S.drafts[di] = bestSplit(d.slice());
+        commit();
+      };
+      head.appendChild(ab);
+    }
+    if(need < 4){
+      var cb = el("button","btn sm ghost","Clear");
+      cb.onclick = function(){ S.drafts[di] = [null,null,null,null]; commit(); };
+      head.appendChild(cb);
+    }
+    if(need === 0){
+      var target = openCourtFor(4);
+      var sb = el("button","btn sm go", target ? ("Send to court " + target.n) : "No open court");
+      sb.disabled = !target;
+      sb.onclick = function(){
+        var ids = d.slice();
+        S.drafts[di] = [null,null,null,null];
+        ids.forEach(function(id, i){ if(id) placeOnCourt(target, id, i); });
+        commit();
+      };
+      head.appendChild(sb);
+    }
+    box.appendChild(head);
+
+    var row = el("div","dslots");
+    d.forEach(function(id, i){
+      if(i === 2) row.appendChild(el("div","dvs","vs"));
+      var b = document.createElement("button");
+      if(id && S.players[id]){
+        var p = S.players[id];
+        b.className = "dchip";
+        b.appendChild(chip(p));
+        b.appendChild(el("span","",p.name));
+        b.title = "Tap to take " + p.name + " out";
+        b.onclick = function(){ d[i] = null; commit(); };
+      } else {
+        b.className = "dchip add";
+        b.textContent = "+ add";
+        b.onclick = function(){ draftPicker(di, i); };
+      }
+      row.appendChild(b);
+    });
+    box.appendChild(row);
+    dw.appendChild(box);
   });
 
   // money + tally
@@ -706,7 +895,7 @@ function quickSend(pid){
   sendToCourt(court,[pid]);
 }
 function pickerFor(court, slotIdx){
-  var bench = benchList();
+  var bench = availableList();
   modal("Court " + court.n + " \u2014 pick a player", function(body, foot, close){
     if(!bench.length){ body.appendChild(el("div","note","Nobody is waiting.")); return; }
     bench.forEach(function(p){
@@ -724,6 +913,32 @@ function pickerFor(court, slotIdx){
       t.style.color = heat(idleOf(p));
       b.appendChild(t);
       b.onclick = function(){ placeOnCourt(court, p.id, slotIdx); close(); commit(); };
+      body.appendChild(b);
+    });
+  });
+}
+
+function draftPicker(di, slotIdx){
+  var pool = availableList();
+  modal("Next " + (di+1) + " \u2014 pick a player", function(body, foot, close){
+    if(!pool.length){
+      body.appendChild(el("div","note","Everyone waiting is already lined up or on a court."));
+      return;
+    }
+    pool.forEach(function(p){
+      var b = document.createElement("button");
+      b.className = "pick";
+      b.appendChild(chip(p));
+      b.appendChild(el("div","pn",p.name));
+      var g = el("div","pg num", p.games + "g");
+      b.appendChild(g);
+      var trial = S.drafts[di].slice(); trial[slotIdx] = p.id;
+      var v = rateMatch(trial);
+      if(v) b.appendChild(verdictChip(v));
+      var t = el("div","pt num",fmt(idleOf(p)));
+      t.style.color = heat(idleOf(p));
+      b.appendChild(t);
+      b.onclick = function(){ S.drafts[di][slotIdx] = p.id; close(); commit(); };
       body.appendChild(b);
     });
   });
@@ -848,6 +1063,7 @@ function rosterModal(){
           if(rm.textContent === "\u00d7"){ rm.textContent = "sure?"; return; }
           var c = onCourt(p.id);
           if(c) c.slots[c.slots.indexOf(p.id)] = null;
+          unDraft(p.id);
           delete S.players[p.id];
           S.order = S.order.filter(function(x){ return x !== p.id; });
           close(); commit(); rosterModal();
@@ -987,7 +1203,6 @@ function financeModal(){
         var owe = p.games * m.rate;
         subtotal += owe;
         var r = el("div","trow");
-        r.appendChild(chip(p));
         r.appendChild(el("div","tn",p.name));
         r.appendChild(el("div","tg num",p.games + "g"));
         r.appendChild(el("div","tc num",peso(owe)));
@@ -1354,13 +1569,27 @@ function modal(title, build){
 /* ---------- wiring ---------- */
 function wire(){
   $("btnSend").onclick = function(){
-    var court = S.courts.find(function(c){
-      return c.slots.filter(function(x){ return x===null; }).length >= 4;
-    });
+    var court = openCourtFor(4);
     if(!court) return;
-    sendToCourt(court, benchList().slice(0,4).map(function(p){ return p.id; }));
+    sendToCourt(court, availableList().slice(0,4).map(function(p){ return p.id; }));
   };
   $("btnSort").onclick = function(){ S.sort = S.sort==="wait"?"games":"wait"; commit(); };
+  $("btnAutoDraft").onclick = function(){
+    S.drafts.forEach(function(d, di){
+      var need = d.filter(function(x){ return x === null; }).length;
+      if(!need) return;
+      var picks = smartPick(need, d.filter(Boolean));
+      for(var i=0;i<d.length && picks.length;i++){
+        if(d[i] === null) d[i] = picks.shift();
+      }
+      if(d.filter(Boolean).length === 4) S.drafts[di] = bestSplit(d.slice());
+    });
+    commit();
+  };
+  $("btnClearDrafts").onclick = function(){
+    S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
+    commit();
+  };
   $("btnArrivals").onclick = arrivalsModal;
   $("btnRoster").onclick = rosterModal;
   $("btnFinance").onclick = financeModal;
@@ -1375,6 +1604,8 @@ function wire(){
       soft.onclick = function(){
         S.startedAt = Date.now(); S.gamesPlayed = 0;
         S.courts.forEach(function(c){ c.slots=[null,null,null,null]; c.startedAt=null; });
+        S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
+        S.met = {};
         S.order.forEach(function(id){
           var p = S.players[id];
           p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null;
@@ -1421,6 +1652,10 @@ load(function(saved){
       if(typeof p.losses !== "number") p.losses = 0;
     });
     uid = max;
+    if(!S.met) S.met = {};
+    if(!S.drafts || !S.drafts.length){
+      S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
+    }
   } else {
     S = freshState();
   }
