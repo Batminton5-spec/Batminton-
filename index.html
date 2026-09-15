@@ -39,7 +39,10 @@ body{margin:0}
 .hero-title{font-family:'Barlow Condensed',sans-serif;font-weight:600;font-size:17px}
 .hero-sub{color:var(--muted);font-size:13px}
 .nextrow{display:flex;gap:8px;flex-wrap:wrap}
-.nextcard{flex:1 1 118px;background:var(--panel2);border-radius:3px;padding:9px 11px;border-left:3px solid var(--cool)}
+.nextcard{flex:1 1 118px;background:var(--panel2);border-radius:3px;padding:9px 11px;
+  border-left:3px solid var(--cool);border-top:1px solid transparent;border-right:1px solid transparent;
+  border-bottom:1px solid transparent;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.nextcard:hover{border-color:var(--line);border-left-color:inherit}
 .nextcard .nm{font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nextcard .tm{font-family:'Barlow Condensed',sans-serif;font-size:27px;font-weight:600;line-height:1.05}
 .nextcard .gm{color:var(--muted);font-size:12px}
@@ -255,6 +258,27 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
         <div id="drafts"></div>
       </div>
 
+    </div>
+
+    <div>
+      <div class="panel">
+        <div class="phead">
+          <div class="ptitle">Bench</div>
+          <div class="pcount" id="benchCount"></div>
+          <div class="spacer"></div>
+          <button class="btn sm" id="btnSort">Longest wait</button>
+        </div>
+        <div class="bench" id="bench"></div>
+      </div>
+
+      <div class="panel money">
+        <div class="phead">
+          <div class="ptitle">Tally</div>
+          <div class="pcount">games and what each owes</div>
+        </div>
+        <div class="tally" id="tally"></div>
+      </div>
+
       <div class="panel money">
         <div class="phead">
           <div class="ptitle">Money</div>
@@ -275,26 +299,6 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
           <div><span>collected</span><b id="mPaid">0</b></div>
           <div><span>unpaid</span><b id="mUnpaid">0</b></div>
         </div>
-      </div>
-    </div>
-
-    <div>
-      <div class="panel">
-        <div class="phead">
-          <div class="ptitle">Bench</div>
-          <div class="pcount" id="benchCount"></div>
-          <div class="spacer"></div>
-          <button class="btn sm" id="btnSort">Longest wait</button>
-        </div>
-        <div class="bench" id="bench"></div>
-      </div>
-
-      <div class="panel money">
-        <div class="phead">
-          <div class="ptitle">Tally</div>
-          <div class="pcount">games and what each owes</div>
-        </div>
-        <div class="tally" id="tally"></div>
       </div>
     </div>
   </div>
@@ -739,8 +743,11 @@ function render(){
 
   var nextFour = free.slice(0,4);
   nextFour.forEach(function(p){
-    var card = el("div","nextcard");
+    var card = document.createElement("button");
+    card.className = "nextcard";
     card.style.borderLeftColor = heat(idleOf(p));
+    card.title = "Tap to send " + p.name + " to a court or a lineup";
+    card.onclick = function(){ sendPlayerModal(p); };
     card.appendChild(el("div","nm",p.name));
 
     if(byGames){
@@ -1099,6 +1106,70 @@ function draftPicker(di, slotIdx){
       body.appendChild(el("div","note",
         "You can line these up now, but the draft cannot be sent until their game ends."));
       busy.forEach(function(p){ addRow(p, true); });
+    }
+  });
+}
+
+function sendPlayerModal(p){
+  modal(p.name + " \u2014 send where?", function(body, foot, close){
+    var any = false;
+
+    var openCourts = S.courts.filter(function(c){ return c.slots.indexOf(null) !== -1; });
+    if(openCourts.length){
+      any = true;
+      body.appendChild(el("div","sechead","Courts"));
+      openCourts.forEach(function(c){
+        var freeSlots = c.slots.filter(function(x){ return x === null; }).length;
+        var b = document.createElement("button");
+        b.className = "pick";
+        b.appendChild(el("div","pn","Court " + c.n));
+        var trial = c.slots.slice();
+        trial[trial.indexOf(null)] = p.id;
+        var v = rateMatch(trial);
+        if(v) b.appendChild(verdictChip(v));
+        var t = el("div","pt num", freeSlots + " free");
+        t.style.fontSize = "15px";
+        t.style.color = "var(--muted)";
+        b.appendChild(t);
+        b.onclick = function(){
+          placeOnCourt(c, p.id, c.slots.indexOf(null));
+          close(); commit();
+        };
+        body.appendChild(b);
+      });
+    }
+
+    var openDrafts = [];
+    S.drafts.forEach(function(d, di){
+      if(d.indexOf(null) !== -1) openDrafts.push({d:d, i:di});
+    });
+    if(openDrafts.length){
+      any = true;
+      body.appendChild(el("div","sechead","Up next"));
+      openDrafts.forEach(function(o){
+        var freeSlots = o.d.filter(function(x){ return x === null; }).length;
+        var b = document.createElement("button");
+        b.className = "pick";
+        b.appendChild(el("div","pn","Next " + (o.i+1)));
+        var trial = o.d.slice();
+        trial[trial.indexOf(null)] = p.id;
+        var v = rateMatch(trial);
+        if(v) b.appendChild(verdictChip(v));
+        var t = el("div","pt num", freeSlots + " free");
+        t.style.fontSize = "15px";
+        t.style.color = "var(--muted)";
+        b.appendChild(t);
+        b.onclick = function(){
+          S.drafts[o.i][o.d.indexOf(null)] = p.id;
+          close(); commit();
+        };
+        body.appendChild(b);
+      });
+    }
+
+    if(!any){
+      body.appendChild(el("div","note",
+        "Every court is full and every lineup is complete. Add a lineup with + to stage more."));
     }
   });
 }
