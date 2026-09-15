@@ -166,6 +166,19 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .dchip{display:flex;align-items:center;gap:5px;background:var(--panel2);border:1px solid transparent;
   border-radius:3px;padding:5px 8px;font:inherit;color:inherit;cursor:pointer;font-size:14px;font-weight:600}
 .dchip:hover{border-color:var(--hot)}
+.logrow{border-bottom:1px solid var(--line);padding:9px 14px}
+.logrow:last-of-type{border-bottom:none}
+.loghead{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}
+.logn{font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;color:var(--accent)}
+.logmeta{font-size:12px;color:var(--muted)}
+.logside{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:var(--panel2);
+  border:1px solid transparent;border-radius:3px;padding:6px 9px;margin-bottom:4px;color:inherit;
+  font:inherit;font-size:14px;cursor:pointer}
+.logside:hover{border-color:var(--accent)}
+.logside.won{border-color:rgba(255,210,63,.45)}
+.logname{flex:1;font-weight:600}
+.logwin{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;color:var(--accent)}
+.lognores{font-size:12px;color:var(--muted);padding-top:2px}
 .pbtn{background:transparent;border:1px solid var(--line);border-radius:2px;cursor:pointer;
   padding:3px 5px;display:flex;align-items:center;gap:2px;flex-shrink:0}
 .pbtn:hover{border-color:var(--accent)}
@@ -215,6 +228,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <button class="link" id="btnRoster">Roster</button>
     <button class="link" id="btnFinance">Finance</button>
     <button class="link" id="btnRanks">Rankings</button>
+    <button class="link" id="btnLog">Log</button>
     <button class="link" id="btnSummary">Summary</button>
     <button class="link" id="btnSync">Sync</button>
     <button class="link" id="btnReset">Reset</button>
@@ -274,7 +288,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
       <div class="panel money">
         <div class="phead">
           <div class="ptitle">Tally</div>
-          <div class="pcount">games and what each owes</div>
+          <div class="pcount">games played</div>
         </div>
         <div class="tally" id="tally"></div>
       </div>
@@ -383,7 +397,7 @@ function freshState(){
   });
   return {
     name:"Game #86", startedAt:Date.now(), gamesPlayed:0, rateOverride:null,
-    drafts:[[null,null,null,null],[null,null,null,null],[null,null,null,null]], met:{},
+    drafts:[[null,null,null,null],[null,null,null,null],[null,null,null,null]], met:{}, log:[],
     courts:[mkCourt(1), mkCourt(2), mkCourt(3)],
     players:players, order:order, sort:"wait",
     cost:{cQty:3, cHrs:4, cRate:450, sQty:24, sPrice:80, xTrans:500, xMisc:1650}
@@ -684,6 +698,16 @@ function endGame(court, winner){
     }
   });
   recordMeeting(court.slots);
+  if(!S.log) S.log = [];
+  S.log.push({
+    n: (S.gamesPlayed||0) + 1,
+    court: court.n,
+    at: now,
+    dur: court.startedAt ? Math.round((now - court.startedAt)/1000) : null,
+    a: [court.slots[0], court.slots[1]],
+    b: [court.slots[2], court.slots[3]],
+    won: (winner === 0 || winner === 1) ? winner : null
+  });
   court.slots = [null,null,null,null];
   court.startedAt = null;
   S.gamesPlayed = (S.gamesPlayed||0) + 1;
@@ -829,8 +853,13 @@ function render(){
         b.appendChild(el("div","sgm num",p.games));
         var dhold = draftOf(id);
         if(dhold !== -1) b.appendChild(el("span","btag","N" + (dhold+1)));
-        b.onclick = function(){ pullFromCourt(court,i); };
-        b.title = "Tap to send " + p.name + " back to the bench";
+        b.onclick = function(){
+          if(court.startedAt) confirmPull(court, i, p);
+          else pullFromCourt(court, i);
+        };
+        b.title = court.startedAt
+          ? p.name + " is mid-game \u2014 tap to take them off"
+          : "Tap to send " + p.name + " back to the bench";
       } else {
         b.className = "slot empty";
         b.textContent = "+ add player";
@@ -993,7 +1022,6 @@ function render(){
       r.appendChild(chip(p));
       r.appendChild(el("div","tn",p.name));
       r.appendChild(el("div","tg num",p.games+"g"));
-      r.appendChild(el("div","tc num", p.exempt ? "\u2014" : peso(p.games*m.rate)));
       if(p.exempt){
         var fb2 = el("div","pay","QM");
         fb2.style.color = "var(--accent)";
@@ -1001,14 +1029,6 @@ function render(){
         fb2.style.textAlign = "center";
         r.appendChild(fb2);
         r.style.opacity = ".72";
-      } else {
-        var pb = el("button","pay " + (p.pay==="unpaid"?"":p.pay),
-          p.pay==="unpaid"?"unpaid":(p.pay==="gcash"?"GCash":"cash"));
-        pb.onclick = function(){
-          p.pay = p.pay==="unpaid"?"gcash":(p.pay==="gcash"?"cash":"unpaid");
-          commit();
-        };
-        r.appendChild(pb);
       }
       tw.appendChild(r);
     });
@@ -1403,7 +1423,7 @@ function financeModal(){
         .filter(function(p){ return p.games > 0 && !p.exempt; });
       if(finFilter === "paid") out = out.filter(function(p){ return p.pay !== "unpaid"; });
       if(finFilter === "unpaid") out = out.filter(function(p){ return p.pay === "unpaid"; });
-      return out.sort(function(a,b){ return b.games - a.games || a.name.localeCompare(b.name); });
+      return out.sort(function(a,b){ return a.name.localeCompare(b.name); });
     }
 
     function refresh(){
@@ -1481,6 +1501,88 @@ function financeModal(){
     refresh();
   });
 }
+function confirmPull(court, i, p){
+  modal("Take " + p.name + " off court " + court.n + "?", function(body, foot, close){
+    body.appendChild(el("div","note",
+      "That game is still running \u2014 it started " + fmt((Date.now()-court.startedAt)/1000)
+      + " ago. Taking someone off does not record a result or count the game."));
+    var yes = el("button","btn danger","Take them off");
+    yes.onclick = function(){ close(); pullFromCourt(court, i); };
+    foot.appendChild(yes);
+    var no = el("button","btn go","Leave them on");
+    no.onclick = close;
+    foot.appendChild(no);
+  });
+}
+
+/* ---------- game log ---------- */
+function applyResult(entry, winner, sign){
+  if(winner !== 0 && winner !== 1) return;
+  var winners = winner === 0 ? entry.a : entry.b;
+  var losers  = winner === 0 ? entry.b : entry.a;
+  winners.forEach(function(id){
+    var p = S.players[id];
+    if(p) p.wins = Math.max(0, (p.wins||0) + sign);
+  });
+  losers.forEach(function(id){
+    var p = S.players[id];
+    if(p) p.losses = Math.max(0, (p.losses||0) + sign);
+  });
+}
+function setWinner(entry, winner){
+  if(entry.won === winner) return;
+  applyResult(entry, entry.won, -1);
+  entry.won = winner;
+  applyResult(entry, winner, +1);
+  commit();
+}
+function sideLabel(ids){
+  return ids.filter(Boolean).map(function(id){
+    return S.players[id] ? S.players[id].name : "?";
+  }).join(" & ") || "\u2014";
+}
+function logModal(){
+  modal("Game log", function(body, foot, close){
+    var log = (S.log || []).slice().reverse();
+    if(!log.length){
+      body.appendChild(el("div","empty-note","No games finished yet."));
+      return;
+    }
+    body.appendChild(el("div","note",
+      log.length + (log.length === 1 ? " game" : " games") + " \u00b7 tap a side to correct who won"));
+
+    log.forEach(function(g){
+      var box = el("div","logrow");
+
+      var head = el("div","loghead");
+      head.appendChild(el("span","logn num","#" + g.n));
+      head.appendChild(el("span","logmeta","court " + g.court));
+      if(g.dur) head.appendChild(el("span","logmeta num", fmt(g.dur)));
+      head.appendChild(el("span","logmeta", new Date(g.at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})));
+      box.appendChild(head);
+
+      [0,1].forEach(function(side){
+        var ids = side === 0 ? g.a : g.b;
+        var b = document.createElement("button");
+        b.className = "logside" + (g.won === side ? " won" : "");
+        b.appendChild(el("span","logname", sideLabel(ids)));
+        if(g.won === side) b.appendChild(el("span","logwin","WON"));
+        b.title = g.won === side ? "Tap to clear this result" : "Mark this side as the winner";
+        b.onclick = function(){
+          setWinner(g, g.won === side ? null : side);
+          close(); logModal();
+        };
+        box.appendChild(b);
+      });
+
+      if(g.won === null){
+        box.appendChild(el("div","lognores","no result recorded"));
+      }
+      body.appendChild(box);
+    });
+  });
+}
+
 /* ---------- who won ---------- */
 function sideNames(court, side){
   var ids = side === 0 ? [court.slots[0], court.slots[1]] : [court.slots[2], court.slots[3]];
@@ -1863,6 +1965,7 @@ function wire(){
   $("btnRoster").onclick = rosterModal;
   $("btnFinance").onclick = financeModal;
   $("btnRanks").onclick = ranksModal;
+  $("btnLog").onclick = logModal;
   $("btnSummary").onclick = summaryModal;
   $("btnSync").onclick = syncModal;
   $("btnReset").onclick = function(){
@@ -1875,6 +1978,7 @@ function wire(){
         S.courts.forEach(function(c){ c.slots=[null,null,null,null]; c.startedAt=null; });
         S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
         S.met = {};
+        S.log = [];
         S.order.forEach(function(id){
           var p = S.players[id];
           p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null; p.paused=false;
@@ -1924,6 +2028,7 @@ load(function(saved){
     });
     uid = max;
     if(!S.met) S.met = {};
+    if(!S.log) S.log = [];
     if(!S.drafts || !S.drafts.length){
       S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
     }
