@@ -209,8 +209,9 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .sechead{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:600;
   padding:10px 14px 4px;border-top:1px solid var(--line);margin-top:4px}
 .sechead:first-child{border-top:none;margin-top:0}
-.rrow{display:flex;align-items:center;gap:8px;padding:6px 14px}
-.rrow .rn{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rrow{display:flex;align-items:center;gap:6px;padding:6px 12px}
+.rrow select{max-width:118px;flex-shrink:1;min-width:0}
+.rrow .rn{flex:1;min-width:0;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rrow.dim .rn{color:var(--muted);font-weight:400}
 .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 </style>
@@ -1308,11 +1309,6 @@ function rosterModal(){
         });
         ls.onchange = function(){ p.level = this.value; save(); render(); };
         r.appendChild(ls);
-        var wt = el("div","num", fmt(p.totalIdle + idleOf(p)));
-        wt.style.fontSize = "15px"; wt.style.color = "var(--muted)"; wt.style.width = "46px";
-        wt.style.textAlign = "right";
-        wt.title = "Total time off court today";
-        r.appendChild(wt);
         var fx = el("button", p.exempt ? "btn sm go" : "btn sm ghost", "QM");
         fx.title = p.exempt
           ? p.name + " is a queue master and pays nothing \u2014 tap to charge them again"
