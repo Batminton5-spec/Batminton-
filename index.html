@@ -383,12 +383,20 @@ function matchScore(ids){
 // Level spacing is deliberately uneven: high beginner to low intermediate is a
 // short step, low to high intermediate is a long one. The thresholds below are
 // read against those weights, not against level positions.
-// The sides must be level or it is Uneven, full stop: any whole step of
-// difference between the two totals fails. Among level matches, a wide skill
-// range on court drops Good to Playable.
+// Mirrored sides are fair by construction: HInt + Beg against HInt + Beg is a
+// Good match however wide the range, because each pair faces its own equal.
+// Otherwise the two totals must be level, and a wide range drops it to Playable.
+function isMirror(ids){
+  if(!ids || ids.length !== 4 || ids.indexOf(null) !== -1) return false;
+  var w = ids.map(function(id){ return lvWeight(S.players[id].level); });
+  var a = [w[0], w[1]].sort(function(x,y){ return x-y; });
+  var b = [w[2], w[3]].sort(function(x,y){ return x-y; });
+  return a[0] === b[0] && a[1] === b[1];
+}
 function rateMatch(ids){
   var m = matchScore(ids);
   if(!m) return null;
+  if(isMirror(ids)) return VERDICTS.good;       // same pairing on both sides
   if(m.spread >= 5) return VERDICTS.uneven;     // weakest link is outclassed
   if(m.teamDiff >= 1) return VERDICTS.uneven;   // sides are not level
   if(m.spread <= 1.5) return VERDICTS.good;
@@ -398,6 +406,13 @@ function rateMatch(ids){
 function matchQuality(ids){
   var m = matchScore(ids);
   if(!m) return 0;
+  // A mirror stays fair however wide the range, but a newbie facing an advanced
+  // player is nobody's good time: keep it legal and rank it last, so the picker
+  // only reaches for it when every other option is actually unfair.
+  if(isMirror(ids)){
+    if(m.spread >= 5) return 2;
+    return m.spread <= 1.5 ? 32 : 28;
+  }
   if(m.spread >= 5) return -70;
   if(m.teamDiff >= 2) return -60;
   if(m.teamDiff >= 1.5) return -40;
@@ -410,11 +425,14 @@ function matchQuality(ids){
 // best way to split 4 players into two pairs
 function bestSplit(ids){
   var orders = [[0,1,2,3],[0,2,1,3],[0,3,1,2]];
-  var best = null, bestDiff = Infinity;
+  var best = null, bestScore = -Infinity;
   orders.forEach(function(o){
+    var arranged = o.map(function(i){ return ids[i]; });
     var v = o.map(function(i){ return lvWeight(S.players[ids[i]].level); });
     var d = Math.abs((v[0]+v[1]) - (v[2]+v[3]));
-    if(d < bestDiff){ bestDiff = d; best = o.map(function(i){ return ids[i]; }); }
+    var spread = Math.max.apply(null, v) - Math.min.apply(null, v);
+    var sc = -d + (isMirror(arranged) ? (spread >= 5 ? 5 : 100) : 0);
+    if(sc > bestScore){ bestScore = sc; best = arranged; }
   });
   return best;
 }
