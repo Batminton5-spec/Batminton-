@@ -676,6 +676,19 @@ function countBy(status){
 
 /* ---------- fair, varied auto-pick ---------- */
 var IDLE_TOLERANCE = 240;   // seconds: waits within 4 minutes count as equal
+var GAME_EQUIV = 360;       // seconds of bench time one game is worth
+
+// Waiting and games played are the same currency here. Someone who has played
+// once carries a six-minute handicap against someone who has not, so an early
+// arriver with a game already does not get stuck behind every latecomer, but
+// does lose the queue to them eventually.
+function effWait(p, avgGames){
+  return idleOf(p) + (avgGames - p.games) * GAME_EQUIV;
+}
+function avgGamesOf(list){
+  if(!list.length) return 0;
+  return list.reduce(function(a, p){ return a + p.games; }, 0) / list.length;
+}
 
 function pairKey(a,b){ return a < b ? a + "|" + b : b + "|" + a; }
 function metEntry(k){
@@ -740,13 +753,16 @@ function smartPick(need, fixed){
   }
   if(pool.length === need) return pool.map(function(p){ return p.id; });
 
-  var edge = idleOf(pool[Math.min(need, pool.length) - 1]) - IDLE_TOLERANCE;
-  var cands = pool.filter(function(p){ return idleOf(p) >= edge; });
+  // rank on effective wait, so time on the bench and games played trade off
+  var avgGames = avgGamesOf(pool);
+  pool = pool.slice().sort(function(a, b){
+    return effWait(b, avgGames) - effWait(a, avgGames);
+  });
+
+  var edge = effWait(pool[Math.min(need, pool.length) - 1], avgGames) - IDLE_TOLERANCE;
+  var cands = pool.filter(function(p){ return effWait(p, avgGames) >= edge; });
   if(cands.length < need) cands = pool.slice(0, need);
   if(cands.length === need) return cands.map(function(p){ return p.id; });
-
-  // average games among the candidates, so the game-count term is relative
-  var avgGames = cands.reduce(function(a,p){ return a + p.games; }, 0) / cands.length;
 
   // if a second court is also empty, judge what this pick leaves behind
   var lookahead = need === 4 && !fixed.length
@@ -764,12 +780,9 @@ function smartPick(need, fixed){
     if(ids.length === 4) sc += matchQuality(bestSplit(ids));
     sc -= repeatPenalty(ids) * 9;
 
-    var waited = pick.reduce(function(a,p){ return a + idleOf(p); }, 0);
-    sc += (waited / 60) * 0.4;                // mild nudge towards longer waits
-
-    // whoever has played least should edge ahead inside the window
-    var games = pick.reduce(function(a,p){ return a + p.games; }, 0) / pick.length;
-    sc += (avgGames - games) * 3;
+    // one term covers both: time waited and games already played
+    var waited = pick.reduce(function(a,p){ return a + effWait(p, avgGames); }, 0);
+    sc += (waited / 60) * 0.4;
 
     if(lookahead){
       // the four longest waiting of what is left would be the next court
