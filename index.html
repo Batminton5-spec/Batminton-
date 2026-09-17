@@ -1164,6 +1164,11 @@ function render(){
       sb.onclick = function(){ stageRequest(r, openDraft); };
       head.appendChild(sb);
 
+      var ed = el("button","btn sm ghost","Edit");
+      ed.title = "Change who is in this request";
+      ed.onclick = function(){ requestModal(r); };
+      head.appendChild(ed);
+
       var pz = document.createElement("button");
       if(r.paused){
         pz.className = "pbtn play";
@@ -1454,50 +1459,80 @@ function stageRequest(r, di){
   S.requests = S.requests.filter(function(x){ return x !== r; });
   commit();
 }
-function addRequestModal(){
-  var chosen = [];
-  modal("New request", function(body, foot, close){
-    body.appendChild(el("div","note","Pick 2 to 4 players who asked to play together."));
+function requestModal(existing){
+  var chosen = existing ? existing.members.slice() : [];
+  modal(existing ? "Edit request" : "New request", function(body, foot, close){
+    body.appendChild(el("div","note",
+      "Pick 2 to 4 players who asked to play together. Only people who have arrived and are not paused are listed."));
     var listWrap = el("div","");
     body.appendChild(listWrap);
 
-    var save = el("button","btn go","Save request");
-    save.disabled = true;
+    var save = el("button","btn go","Save");
     save.onclick = function(){
       if(chosen.length < 2) return;
-      S.requests.push({id:"r"+Date.now(), members:chosen.slice(), at:Date.now()});
+      if(existing) existing.members = chosen.slice();
+      else S.requests.push({id:"r"+Date.now(), members:chosen.slice(), at:Date.now()});
       S.showReq = true;
       close(); commit();
     };
     foot.appendChild(save);
 
+    if(existing){
+      var drop = el("button","btn danger","Delete request");
+      drop.onclick = function(){
+        S.requests = S.requests.filter(function(q){ return q !== existing; });
+        close(); commit();
+      };
+      foot.appendChild(drop);
+    }
+
     function paint(){
       listWrap.innerHTML = "";
       save.disabled = chosen.length < 2;
-      save.textContent = chosen.length ? ("Save request (" + chosen.length + ")") : "Save request";
-      S.order.map(function(id){ return S.players[id]; })
-        .filter(function(p){ return p.status !== "out"; })
-        .sort(function(a,b){ return a.name.localeCompare(b.name); })
-        .forEach(function(p){
-          var on = chosen.indexOf(p.id) !== -1;
-          var b = document.createElement("button");
-          b.className = "pick";
-          b.appendChild(chip(p));
-          var nm = el("div","pn",p.name);
-          if(on) nm.style.color = "var(--accent)";
-          b.appendChild(nm);
-          b.appendChild(el("div","pt num", on ? "\u2713" : ""));
-          b.onclick = function(){
-            if(on) chosen = chosen.filter(function(x){ return x !== p.id; });
-            else if(chosen.length < 4) chosen.push(p.id);
-            paint();
-          };
-          listWrap.appendChild(b);
-        });
+      save.textContent = chosen.length
+        ? ((existing ? "Save changes (" : "Save request (") + chosen.length + ")")
+        : (existing ? "Save changes" : "Save request");
+
+      // available players, plus anyone already chosen so they can be taken out
+      var listed = S.order.map(function(id){ return S.players[id]; })
+        .filter(function(p){
+          return (p.status === "in" && !p.paused) || chosen.indexOf(p.id) !== -1;
+        })
+        .sort(function(a,b){ return a.name.localeCompare(b.name); });
+
+      if(!listed.length){
+        listWrap.appendChild(el("div","empty-note","Nobody has arrived yet."));
+        return;
+      }
+
+      listed.forEach(function(p){
+        var on = chosen.indexOf(p.id) !== -1;
+        var away = !(p.status === "in" && !p.paused);
+        var b = document.createElement("button");
+        b.className = "pick";
+        b.appendChild(chip(p));
+        var nm = el("div","pn",p.name);
+        if(on) nm.style.color = "var(--accent)";
+        b.appendChild(nm);
+        if(away){
+          var w = el("div","pg", p.status === "out" ? "left" : "paused");
+          w.style.color = "var(--hot)";
+          w.style.fontSize = "12px";
+          b.appendChild(w);
+        }
+        b.appendChild(el("div","pt num", on ? "\u2713" : ""));
+        b.onclick = function(){
+          if(on) chosen = chosen.filter(function(x){ return x !== p.id; });
+          else if(chosen.length < 4) chosen.push(p.id);
+          paint();
+        };
+        listWrap.appendChild(b);
+      });
     }
     paint();
   });
 }
+function addRequestModal(){ requestModal(null); }
 
 /* ---------- arrivals ---------- */
 function arrivalsModal(){
