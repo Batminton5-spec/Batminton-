@@ -331,7 +331,7 @@ var LEVELS = [
   {key:"newbie", short:"New",   full:"Newbie",            w:0,   color:"#59636F"},
   {key:"beg",    short:"Beg",   full:"Beginner",          w:2,   color:"#6E7A88"},
   {key:"hbeg",   short:"H.Beg", full:"High beginner",     w:3,   color:"#8593A3"},
-  {key:"lint",   short:"L.Int", full:"Low intermediate",  w:4,   color:"#9FAEBF"},
+  {key:"lint",   short:"L.Int", full:"Low intermediate",  w:3.5, color:"#9FAEBF"},
   {key:"hint",   short:"H.Int", full:"High intermediate", w:5,   color:"#BFCEDE"},
   {key:"adv",    short:"Adv",   full:"Advanced",          w:6.5, color:"#E6EFF9"}
 ];
@@ -360,25 +360,34 @@ function matchScore(ids){
     spread: Math.max.apply(null, v) - Math.min.apply(null, v)
   };
 }
+// Good means the sides are genuinely level: a whole level of difference on one
+// player (teamDiff 1) is an edge, not a fair match, so it drops to Playable.
+// Level spacing is deliberately uneven: high beginner to low intermediate is a
+// short step, low to high intermediate is a long one. The thresholds below are
+// read against those weights, not against level positions.
+// The sides must be level or it is Uneven, full stop: any whole step of
+// difference between the two totals fails. Among level matches, a wide skill
+// range on court drops Good to Playable.
 function rateMatch(ids){
   var m = matchScore(ids);
   if(!m) return null;
-  if(m.spread >= 5 || m.teamDiff > 4) return VERDICTS.uneven;
-  if(m.teamDiff > 2.5) return VERDICTS.uneven;
-  if(m.teamDiff <= 1 && m.spread <= 1.5) return VERDICTS.good;
-  if(m.teamDiff <= 1.5 && m.spread <= 2.5) return VERDICTS.good;
-  return VERDICTS.playable;
+  if(m.spread >= 5) return VERDICTS.uneven;     // weakest link is outclassed
+  if(m.teamDiff >= 1) return VERDICTS.uneven;   // sides are not level
+  if(m.spread <= 1.5) return VERDICTS.good;
+  return VERDICTS.playable;                     // level sides, wide range on court
 }
 // finer grain for the auto-picker than the three labels expose
 function matchQuality(ids){
   var m = matchScore(ids);
   if(!m) return 0;
-  if(m.spread >= 5 || m.teamDiff > 4) return -70;
-  if(m.teamDiff > 2.5) return -25;
-  if(m.teamDiff <= 1 && m.spread <= 1.5) return 30;
-  if(m.teamDiff <= 1.5 && m.spread <= 2.5) return 26;
-  if(m.teamDiff <= 2.5 && m.spread < 5) return 18;
-  return 0;
+  if(m.spread >= 5) return -70;
+  if(m.teamDiff >= 2) return -60;
+  if(m.teamDiff >= 1.5) return -40;
+  if(m.teamDiff >= 1) return -25;
+  if(m.spread <= 1) return 30;      // dead level, tight range
+  if(m.spread <= 1.5) return 26;    // Good
+  if(m.spread <= 3) return 14;      // Playable
+  return 8;
 }
 // best way to split 4 players into two pairs
 function bestSplit(ids){
