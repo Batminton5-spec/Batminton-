@@ -910,8 +910,8 @@ function render(){
       r.title = p.name + " is lined up in Next " + (di+1);
       r.onclick = function(){ unDraft(p.id); commit(); };
     } else {
-      r.onclick = function(){ quickSend(p.id); };
-      r.title = "Tap to put " + p.name + " on the next open slot";
+      r.onclick = function(){ sendPlayerModal(p); };
+      r.title = "Tap to send " + p.name + " to a court or a lineup";
     }
     bw.appendChild(r);
   });
@@ -942,6 +942,12 @@ function render(){
         commit();
       };
       head.appendChild(ab);
+    }
+    if(need === 0){
+      var eb2 = el("button","btn sm","Even teams");
+      eb2.title = "Rearrange these four into the fairest pairing";
+      eb2.onclick = function(){ S.drafts[di] = bestSplit(d.slice()); commit(); };
+      head.appendChild(eb2);
     }
     if(need < 4){
       var cb = el("button","btn sm ghost","Clear");
