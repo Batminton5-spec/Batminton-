@@ -328,47 +328,64 @@ var KEY = "badminton-bench-clock-v2";
 
 /* ---------- levels ---------- */
 var LEVELS = [
-  {key:"newbie", short:"New",   full:"Newbie",            color:"#59636F"},
-  {key:"beg",    short:"Beg",   full:"Beginner",          color:"#6E7A88"},
-  {key:"hbeg",   short:"H.Beg", full:"High beginner",     color:"#8593A3"},
-  {key:"lint",   short:"L.Int", full:"Low intermediate",  color:"#9FAEBF"},
-  {key:"hint",   short:"H.Int", full:"High intermediate", color:"#BFCEDE"},
-  {key:"adv",    short:"Adv",   full:"Advanced",          color:"#E6EFF9"}
+  {key:"newbie", short:"New",   full:"Newbie",            w:0,   color:"#59636F"},
+  {key:"beg",    short:"Beg",   full:"Beginner",          w:2,   color:"#6E7A88"},
+  {key:"hbeg",   short:"H.Beg", full:"High beginner",     w:3,   color:"#8593A3"},
+  {key:"lint",   short:"L.Int", full:"Low intermediate",  w:4,   color:"#9FAEBF"},
+  {key:"hint",   short:"H.Int", full:"High intermediate", w:5,   color:"#BFCEDE"},
+  {key:"adv",    short:"Adv",   full:"Advanced",          w:6.5, color:"#E6EFF9"}
 ];
 function lvIndex(key){
   for(var i=0;i<LEVELS.length;i++){ if(LEVELS[i].key === key) return i; }
   return 3;
 }
 function lvOf(p){ return LEVELS[lvIndex(p.level)]; }
+function lvWeight(key){ return LEVELS[lvIndex(key)].w; }
 
 /* ---------- match quality ---------- */
 var VERDICTS = {
-  good:      {label:"Good match", color:"#5FBF8A"},
-  balanced:  {label:"Balanced",   color:"#A8C98C"},
-  notbad:    {label:"Not bad",    color:"#FFD23F"},
-  unbalanced:{label:"Unbalanced", color:"#E0873A"},
-  bad:       {label:"Bad match",  color:"#D6323C"}
+  good:     {label:"Good",     color:"#5FBF8A", rank:3},
+  playable: {label:"Playable", color:"#FFD23F", rank:2},
+  uneven:   {label:"Uneven",   color:"#D6323C", rank:1}
 };
 // slots 0,1 = near side; slots 2,3 = far side
-function rateMatch(ids){
+// scores on the weighted level scale: how even the sides are, and how far
+// apart the strongest and weakest player on court are (the weakest link gets
+// targeted every rally, so a wide spread caps the verdict on its own)
+function matchScore(ids){
   if(!ids || ids.length !== 4 || ids.indexOf(null) !== -1) return null;
-  var v = ids.map(function(id){ return lvIndex(S.players[id].level); });
-  var teamDiff = Math.abs((v[0]+v[1]) - (v[2]+v[3]));
-  var spread = Math.max.apply(null, v) - Math.min.apply(null, v);
-  if(spread >= 5) return VERDICTS.bad;          // newbie across from advanced
-  if(teamDiff >= 4) return VERDICTS.bad;        // one side clearly stacked
-  if(teamDiff === 3) return VERDICTS.unbalanced;
-  if(teamDiff === 2) return spread <= 2 ? VERDICTS.notbad : VERDICTS.unbalanced;
-  if(spread <= 1) return VERDICTS.good;         // teams even from here down
-  if(spread <= 2) return VERDICTS.balanced;
-  return VERDICTS.notbad;                       // even teams, wide range
+  var v = ids.map(function(id){ return lvWeight(S.players[id].level); });
+  return {
+    teamDiff: Math.abs((v[0]+v[1]) - (v[2]+v[3])),
+    spread: Math.max.apply(null, v) - Math.min.apply(null, v)
+  };
+}
+function rateMatch(ids){
+  var m = matchScore(ids);
+  if(!m) return null;
+  if(m.spread >= 5 || m.teamDiff > 4) return VERDICTS.uneven;
+  if(m.teamDiff > 2.5) return VERDICTS.uneven;
+  if(m.teamDiff <= 1 && m.spread <= 1.5) return VERDICTS.good;
+  if(m.teamDiff <= 1.5 && m.spread <= 2.5) return VERDICTS.good;
+  return VERDICTS.playable;
+}
+// finer grain for the auto-picker than the three labels expose
+function matchQuality(ids){
+  var m = matchScore(ids);
+  if(!m) return 0;
+  if(m.spread >= 5 || m.teamDiff > 4) return -70;
+  if(m.teamDiff > 2.5) return -25;
+  if(m.teamDiff <= 1 && m.spread <= 1.5) return 30;
+  if(m.teamDiff <= 1.5 && m.spread <= 2.5) return 26;
+  if(m.teamDiff <= 2.5 && m.spread < 5) return 18;
+  return 0;
 }
 // best way to split 4 players into two pairs
 function bestSplit(ids){
   var orders = [[0,1,2,3],[0,2,1,3],[0,3,1,2]];
   var best = null, bestDiff = Infinity;
   orders.forEach(function(o){
-    var v = o.map(function(i){ return lvIndex(S.players[ids[i]].level); });
+    var v = o.map(function(i){ return lvWeight(S.players[ids[i]].level); });
     var d = Math.abs((v[0]+v[1]) - (v[2]+v[3]));
     if(d < bestDiff){ bestDiff = d; best = o.map(function(i){ return ids[i]; }); }
   });
@@ -588,14 +605,7 @@ function repeatPenalty(ids){
   }
   return n;
 }
-function verdictScore(v){
-  if(!v) return 0;
-  if(v === VERDICTS.good) return 30;
-  if(v === VERDICTS.balanced) return 26;
-  if(v === VERDICTS.notbad) return 18;
-  if(v === VERDICTS.unbalanced) return -25;
-  return -70;
-}
+
 function sampleN(arr, n){
   var c = arr.slice();
   for(var i=c.length-1;i>0;i--){
@@ -627,7 +637,7 @@ function smartPick(need, fixed){
     var pick = sampleN(cands, need);
     var ids = fixed.concat(pick.map(function(p){ return p.id; }));
     var sc = 0;
-    if(ids.length === 4) sc += verdictScore(rateMatch(bestSplit(ids)));
+    if(ids.length === 4) sc += matchQuality(bestSplit(ids));
     sc -= repeatPenalty(ids) * 9;
     var waited = pick.reduce(function(a,p){ return a + idleOf(p); }, 0);
     sc += (waited / 60) * 0.4;                // mild nudge towards longer waits
@@ -1142,6 +1152,11 @@ function sendPlayerModal(p){
     var any = false;
 
     var openCourts = S.courts.filter(function(c){ return c.slots.indexOf(null) !== -1; });
+    openCourts.sort(function(x,y){
+      var tx = x.slots.slice(); tx[tx.indexOf(null)] = p.id;
+      var ty = y.slots.slice(); ty[ty.indexOf(null)] = p.id;
+      return matchQuality(ty) - matchQuality(tx);
+    });
     if(openCourts.length){
       any = true;
       body.appendChild(el("div","sechead","Courts"));
@@ -1169,6 +1184,11 @@ function sendPlayerModal(p){
     var openDrafts = [];
     S.drafts.forEach(function(d, di){
       if(d.indexOf(null) !== -1) openDrafts.push({d:d, i:di});
+    });
+    openDrafts.sort(function(x,y){
+      var tx = x.d.slice(); tx[tx.indexOf(null)] = p.id;
+      var ty = y.d.slice(); ty[ty.indexOf(null)] = p.id;
+      return matchQuality(ty) - matchQuality(tx);
     });
     if(openDrafts.length){
       any = true;
