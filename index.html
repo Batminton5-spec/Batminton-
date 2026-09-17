@@ -205,6 +205,11 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .dvs{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;padding:0 2px}
 .btag{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:600;color:var(--accent);
   border:1px solid rgba(255,210,63,.4);border-radius:2px;padding:0 4px;flex-shrink:0}
+.reqalert{background:transparent;border:1px solid rgba(95,191,138,.5);border-radius:3px;
+  color:var(--chalk);font-family:'Barlow',sans-serif;font-size:13px;padding:2px 8px;cursor:pointer}
+.reqalert:hover{border-color:#5FBF8A}
+.reqnum{font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;color:var(--muted);
+  min-width:13px}
 .syncdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;
   vertical-align:middle}
 .cfgbox{width:100%;height:150px;background:#05070A;color:var(--chalk);border:1px solid var(--line);
@@ -230,6 +235,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <div class="topstat">waiting <b id="statWait">0</b></div>
     <div class="topstat">games <b id="statGames">0</b></div>
     <div class="topstat">longest wait <b id="statLong">—</b></div>
+    <button class="topstat reqalert" id="reqBadge" style="display:none"></button>
     <div class="topstat" id="syncBadge" style="display:none"></div>
     <div class="spacer"></div>
     <button class="link" id="btnArrivals">Arrivals</button>
@@ -612,6 +618,22 @@ function draftHasPlayers(d){ return d.filter(Boolean).length; }
 function draftStillPlaying(d){
   return d.filter(Boolean).some(function(id){ return !!onCourt(id); });
 }
+function inRequest(pid){
+  return (S.requests || []).some(function(r){
+    return !r.paused && r.members.indexOf(pid) !== -1;
+  });
+}
+function requestOf(pid){
+  var found = null;
+  (S.requests || []).forEach(function(r){
+    if(!found && !r.paused && r.members.indexOf(pid) !== -1) found = r;
+  });
+  return found;
+}
+// the bench minus anyone a live request is holding: what auto-fill may draw on
+function autoPool(){
+  return availableList().filter(function(p){ return !inRequest(p.id); });
+}
 function availableList(){
   return benchList().filter(function(p){ return draftOf(p.id) === -1; });
 }
@@ -664,11 +686,15 @@ function sampleN(arr, n){
 // weighted towards balanced matches and away from repeat pairings
 function smartPick(need, fixed){
   fixed = (fixed || []).filter(Boolean);
-  var pool = availableList();                 // already ordered longest wait first
+  var pool = autoPool();                      // already ordered longest wait first
   if(pool.length < need){
-    // bench cannot fill it: top up with players still on court, lowest priority
-    var topUp = onCourtPool().slice(0, need - pool.length);
-    return pool.concat(topUp).map(function(p){ return p.id; });
+    // fall back in order: players a request is holding, then players still on court
+    var held = availableList().filter(function(p){ return inRequest(p.id); });
+    pool = pool.concat(held);
+    if(pool.length < need){
+      pool = pool.concat(onCourtPool().slice(0, need - pool.length));
+    }
+    return pool.slice(0, need).map(function(p){ return p.id; });
   }
   if(pool.length === need) return pool.map(function(p){ return p.id; });
 
@@ -817,7 +843,7 @@ function render(){
       waitingToArrive ? "Nobody on the bench yet. Mark people arrived under Arrivals."
                       : "Nobody on the bench. Everyone is playing."));
   }
-  var free = availableList();
+  var free = autoPool();
   var byGames = S.sort === "games";
   $("heroSub").textContent = byGames ? "fewest games played" : "longest off the court";
   $("btnHeroSort").textContent = byGames ? "Fewest games" : "Longest wait";
@@ -889,7 +915,7 @@ function render(){
       };
       row.appendChild(eb);
     }
-    if(filled < 4 && availableList().length){
+    if(filled < 4 && autoPool().length){
       var fb = el("button","btn sm","Fill");
       fb.onclick = function(){
         sendToCourt(court, smartPick(4 - filled, court.slots.filter(Boolean)));
@@ -958,6 +984,15 @@ function render(){
       commit();
     };
     r.appendChild(pz);
+
+    var heldBy = requestOf(p.id);
+    if(heldBy){
+      var rt = el("div","btag","REQ");
+      rt.title = "Held for a request with " + heldBy.members.map(function(x){
+        return S.players[x] ? S.players[x].name : "?";
+      }).join(", ");
+      r.appendChild(rt);
+    }
 
     var di = draftOf(p.id);
     if(di !== -1){
@@ -1076,21 +1111,42 @@ function render(){
   var rw = $("requests"); rw.innerHTML = "";
   var reqs = S.requests || [];
   var readyN = reqs.filter(function(r){ return reqStatus(r).state === "ready"; }).length;
+  var pausedN = reqs.filter(function(r){ return r.paused; }).length;
   $("reqCount").textContent = reqs.length
     ? (reqs.length + (reqs.length === 1 ? " request" : " requests")
-       + (readyN ? (" \u00b7 " + readyN + " ready") : ""))
+       + (readyN ? (" \u00b7 " + readyN + " ready") : "")
+       + (pausedN ? (" \u00b7 " + pausedN + " paused") : ""))
     : "none yet";
   $("btnToggleReq").textContent = S.showReq ? "Hide" : "Show";
+
+  var readyIdx = [];
+  reqs.forEach(function(r, i){ if(reqStatus(r).state === "ready") readyIdx.push(i+1); });
+  var rb = $("reqBadge");
+  if(readyIdx.length){
+    rb.style.display = "";
+    rb.innerHTML = "";
+    var rd = document.createElement("span");
+    rd.className = "syncdot";
+    rd.style.background = "#5FBF8A";
+    rb.appendChild(rd);
+    rb.appendChild(document.createTextNode(
+      (readyIdx.length === 1 ? "request " : "requests ") + readyIdx.join(", ") + " ready"));
+    rb.title = "Tap to open the requests panel";
+  } else {
+    rb.style.display = "none";
+  }
   rw.style.display = S.showReq ? "" : "none";
 
   if(S.showReq){
     if(!reqs.length){
       rw.appendChild(el("div","empty-note","No requests. Add one when a group asks to play together."));
     }
-    reqs.forEach(function(r){
+    reqs.forEach(function(r, ri){
       var st = reqStatus(r);
       var box = el("div","req");
+      if(r.paused) box.style.opacity = ".6";
       var head = el("div","reqhead");
+      head.appendChild(el("div","reqnum num", (ri+1)));
       head.appendChild(el("div","reqnames",
         reqMembers(r).map(function(p){ return p.name; }).join(" + ")));
       var badge = el("span","reqstat",st.label);
@@ -1108,6 +1164,20 @@ function render(){
       sb.onclick = function(){ stageRequest(r, openDraft); };
       head.appendChild(sb);
 
+      var pz = document.createElement("button");
+      if(r.paused){
+        pz.className = "pbtn play";
+        pz.appendChild(document.createElement("i"));
+        pz.title = "Resume this request";
+      } else {
+        pz.className = "pbtn";
+        pz.appendChild(document.createElement("i"));
+        pz.appendChild(document.createElement("i"));
+        pz.title = "Pause \u2014 these players go back into auto-fill";
+      }
+      pz.onclick = function(){ r.paused = !r.paused; commit(); };
+      head.appendChild(pz);
+
       var x = el("button","btn sm ghost","\u00d7");
       x.title = "Drop this request";
       x.onclick = function(){
@@ -1117,7 +1187,10 @@ function render(){
       head.appendChild(x);
       box.appendChild(head);
 
-      if(st.state === "ready"){
+      if(st.state === "paused"){
+        box.appendChild(el("div","reqnote",
+          "On hold \u2014 these players are back in the normal rotation."));
+      } else if(st.state === "ready"){
         box.appendChild(el("div","reqnote","Nobody gets passed over \u2014 run it now."));
       } else if(st.skips){
         box.appendChild(el("div","reqnote",
@@ -1335,6 +1408,7 @@ function reqMembers(r){
 function reqStatus(r){
   var mem = reqMembers(r);
   if(mem.length < 2) return {state:"broken", label:"needs 2+", color:"var(--muted)"};
+  if(r.paused) return {state:"paused", label:"paused", color:"var(--muted)"};
 
   var away = mem.filter(function(p){
     return p.status !== "in" || p.paused || onCourt(p.id);
@@ -1361,6 +1435,7 @@ function reqStatus(r){
 function readyRequest(){
   var best = null, bestSkips = 1e9;
   (S.requests || []).forEach(function(r){
+    if(r.paused) return;
     var st = reqStatus(r);
     if(st.state === "ready" && st.skips < bestSkips){ bestSkips = st.skips; best = r; }
   });
@@ -2191,6 +2266,7 @@ function wire(){
     commit();
   };
   $("btnAddReq").onclick = addRequestModal;
+  $("reqBadge").onclick = function(){ S.showReq = true; commit(); };
   $("btnToggleReq").onclick = function(){ S.showReq = !S.showReq; commit(); };
   $("btnClearDrafts").onclick = function(){
     S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
