@@ -198,6 +198,10 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .prow{display:flex;align-items:center;gap:8px;padding:6px 13px;opacity:.6}
 .prow .pn2{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .prow .pw{font-family:'Barlow Condensed',sans-serif;font-size:15px;color:var(--muted)}
+.ord{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:2px;
+  cursor:pointer;font-size:13px;line-height:1;padding:3px 6px;flex-shrink:0}
+.ord:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.ord:disabled{opacity:.25;cursor:not-allowed}
 .dgames{font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:600;
   color:var(--muted);padding-left:1px}
 .dchip.playing .dgames{color:var(--hot);opacity:.8}
@@ -208,6 +212,9 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .dvs{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;padding:0 2px}
 .btag{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:600;color:var(--accent);
   border:1px solid rgba(255,210,63,.4);border-radius:2px;padding:0 4px;flex-shrink:0}
+.nextalert{background:transparent;border:1px solid rgba(255,210,63,.55);border-radius:3px;
+  color:var(--chalk);font-family:'Barlow',sans-serif;font-size:13px;padding:2px 8px;cursor:pointer}
+.nextalert:hover{border-color:var(--accent)}
 .reqalert{background:transparent;border:1px solid rgba(95,191,138,.5);border-radius:3px;
   color:var(--chalk);font-family:'Barlow',sans-serif;font-size:13px;padding:2px 8px;cursor:pointer}
 .reqalert:hover{border-color:#5FBF8A}
@@ -238,6 +245,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <div class="topstat">waiting <b id="statWait">0</b></div>
     <div class="topstat">games <b id="statGames">0</b></div>
     <div class="topstat">longest wait <b id="statLong">—</b></div>
+    <button class="topstat nextalert" id="nextBadge" style="display:none"></button>
     <button class="topstat reqalert" id="reqBadge" style="display:none"></button>
     <div class="topstat" id="syncBadge" style="display:none"></div>
     <div class="spacer"></div>
@@ -279,7 +287,7 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
       <div class="panel money">
         <div class="phead">
           <div class="ptitle">Up next</div>
-          <div class="pcount" id="draftCount">line up the next matches</div>
+          <div class="pcount" id="draftCount"></div>
           <div class="spacer"></div>
           <button class="btn sm" id="btnAutoDraft">Auto-fill all</button>
           <button class="btn sm" id="btnClearDrafts">Clear</button>
@@ -618,6 +626,20 @@ function onCourtPool(){
   return out.sort(function(a,b){ return a.games - b.games || a.name.localeCompare(b.name); });
 }
 function draftHasPlayers(d){ return d.filter(Boolean).length; }
+function moveDraft(from, to){
+  if(to < 0 || to >= S.drafts.length || from === to) return;
+  var d = S.drafts.splice(from, 1)[0];
+  S.drafts.splice(to, 0, d);
+  commit();
+}
+function draftOverdue(d){
+  var mem = d.filter(Boolean).map(function(id){ return S.players[id]; }).filter(Boolean);
+  if(!mem.length) return 0;
+  var front = autoPool()[0];
+  if(!front) return 0;
+  var worst = Math.max.apply(null, mem.map(function(p){ return idleOf(p); }));
+  return worst > idleOf(front) ? worst - idleOf(front) : 0;
+}
 function draftStillPlaying(d){
   return d.filter(Boolean).some(function(id){ return !!onCourt(id); });
 }
@@ -656,25 +678,42 @@ function countBy(status){
 var IDLE_TOLERANCE = 240;   // seconds: waits within 4 minutes count as equal
 
 function pairKey(a,b){ return a < b ? a + "|" + b : b + "|" + a; }
+function metEntry(k){
+  var v = S.met ? S.met[k] : null;
+  if(v === null || v === undefined) return null;
+  if(typeof v === "number") return {n:v, last:0};      // older saves
+  return v;
+}
 function recordMeeting(ids){
   var list = ids.filter(Boolean);
   if(!S.met) S.met = {};
+  var g = (S.gamesPlayed || 0) + 1;
   for(var i=0;i<list.length;i++){
     for(var j=i+1;j<list.length;j++){
       var k = pairKey(list[i], list[j]);
-      S.met[k] = (S.met[k] || 0) + 1;
+      var prev = metEntry(k);
+      S.met[k] = {n: (prev ? prev.n : 0) + 1, last: g};
     }
   }
 }
+// A pairing from twenty games ago should not constrain the picker as hard as one
+// from two games ago, so the penalty fades with age.
+function metWeight(age){
+  if(age <= 6) return 1;
+  if(age <= 15) return 0.6;
+  return 0.3;
+}
 function repeatPenalty(ids){
   if(!S.met) return 0;
-  var list = ids.filter(Boolean), n = 0;
+  var list = ids.filter(Boolean), total = 0;
+  var now = S.gamesPlayed || 0;
   for(var i=0;i<list.length;i++){
     for(var j=i+1;j<list.length;j++){
-      n += S.met[pairKey(list[i], list[j])] || 0;
+      var e = metEntry(pairKey(list[i], list[j]));
+      if(e) total += e.n * metWeight(now - e.last);
     }
   }
-  return n;
+  return total;
 }
 
 function sampleN(arr, n){
@@ -706,6 +745,16 @@ function smartPick(need, fixed){
   if(cands.length < need) cands = pool.slice(0, need);
   if(cands.length === need) return cands.map(function(p){ return p.id; });
 
+  // average games among the candidates, so the game-count term is relative
+  var avgGames = cands.reduce(function(a,p){ return a + p.games; }, 0) / cands.length;
+
+  // if a second court is also empty, judge what this pick leaves behind
+  var lookahead = need === 4 && !fixed.length
+    && S.courts.filter(function(c){
+         return c.slots.filter(function(x){ return x === null; }).length >= 4;
+       }).length >= 2
+    && cands.length >= 8;
+
   var best = null, bestScore = -Infinity;
   var tries = Math.min(800, 80 * cands.length);
   for(var t=0;t<tries;t++){
@@ -714,8 +763,27 @@ function smartPick(need, fixed){
     var sc = 0;
     if(ids.length === 4) sc += matchQuality(bestSplit(ids));
     sc -= repeatPenalty(ids) * 9;
+
     var waited = pick.reduce(function(a,p){ return a + idleOf(p); }, 0);
     sc += (waited / 60) * 0.4;                // mild nudge towards longer waits
+
+    // whoever has played least should edge ahead inside the window
+    var games = pick.reduce(function(a,p){ return a + p.games; }, 0) / pick.length;
+    sc += (avgGames - games) * 3;
+
+    if(lookahead){
+      // the four longest waiting of what is left would be the next court
+      var taken = {};
+      pick.forEach(function(p){ taken[p.id] = 1; });
+      var rest = [];
+      for(var r=0; r<cands.length && rest.length<4; r++){
+        if(!taken[cands[r].id]) rest.push(cands[r].id);
+      }
+      if(rest.length === 4){
+        sc += (matchQuality(bestSplit(rest)) - repeatPenalty(rest) * 9) * 0.5;
+      }
+    }
+
     if(sc > bestScore){ bestScore = sc; best = pick; }
   }
   return best.map(function(p){ return p.id; });
@@ -918,6 +986,26 @@ function render(){
       };
       row.appendChild(eb);
     }
+    if(filled === 0){
+      var ready = -1;
+      S.drafts.forEach(function(dd, i){
+        if(ready === -1
+           && dd.every(function(x){ return x !== null; })
+           && !draftStillPlaying(dd)) ready = i;
+      });
+      if(ready !== -1){
+        var nb2 = el("button","btn sm go","Send Next " + (ready+1));
+        nb2.title = "Put the staged lineup on this court";
+        nb2.onclick = function(){
+          var ids = S.drafts[ready].slice();
+          S.drafts.splice(ready, 1);
+          S.drafts.push([null,null,null,null]);
+          ids.forEach(function(id, i){ if(id) placeOnCourt(court, id, i); });
+          commit();
+        };
+        row.appendChild(nb2);
+      }
+    }
     if(filled < 4 && autoPool().length){
       var fb = el("button","btn sm","Fill");
       fb.onclick = function(){
@@ -1014,13 +1102,35 @@ function render(){
   // up next drafts
   var dw = $("drafts"); dw.innerHTML = "";
   $("draftCount").textContent = S.drafts.length
-    + (S.drafts.length === 1 ? " lineup" : " lineups");
+    + (S.drafts.length === 1 ? " lineup \u00b7 send Next 1 first" : " lineups \u00b7 send Next 1 first");
   S.drafts.forEach(function(d, di){
     var box = el("div","draft");
     var head = el("div","dhead");
     head.appendChild(el("div","dname","Next " + (di+1)));
+
+    if(S.drafts.length > 1 && d.filter(Boolean).length){
+      var up = el("button","ord","\u2191");
+      up.title = "Move this lineup earlier";
+      up.disabled = di === 0;
+      up.onclick = function(){ moveDraft(di, di-1); };
+      head.appendChild(up);
+
+      var dn = el("button","ord","\u2193");
+      dn.title = "Move this lineup later";
+      dn.disabled = di === S.drafts.length - 1;
+      dn.onclick = function(){ moveDraft(di, di+1); };
+      head.appendChild(dn);
+    }
     var v = rateMatch(d);
     if(v) head.appendChild(verdictChip(v));
+    var over = draftOverdue(d);
+    if(over > 60){
+      var ob = el("span","vd","overdue");
+      ob.style.color = "#080A0E";
+      ob.style.background = "#E0873A";
+      ob.title = "Someone here has waited " + fmt(over) + " longer than the front of the bench";
+      head.appendChild(ob);
+    }
     head.appendChild(el("div","spacer"));
 
     var need = d.filter(function(x){ return x === null; }).length;
@@ -1057,7 +1167,8 @@ function render(){
       if(waiting) sb.title = "Someone in this lineup is still on a court";
       sb.onclick = function(){
         var ids = d.slice();
-        S.drafts[di] = [null,null,null,null];
+        S.drafts.splice(di, 1);                       // pull it out of the queue
+        S.drafts.push([null,null,null,null]);         // and open a fresh slot at the back
         ids.forEach(function(id, i){ if(id) placeOnCourt(target, id, i); });
         commit();
       };
@@ -1090,6 +1201,10 @@ function render(){
       row.appendChild(b);
     });
     box.appendChild(row);
+    if(over > 60 && need === 0){
+      box.appendChild(el("div","reqnote",
+        "Waiting longer than anyone on the bench \u2014 send this one next."));
+    }
     dw.appendChild(box);
   });
 
@@ -1124,6 +1239,37 @@ function render(){
        + (pausedN ? (" \u00b7 " + pausedN + " paused") : ""))
     : "none yet";
   $("btnToggleReq").textContent = S.showReq ? "Hide" : "Show";
+
+  // a staged lineup with a court free is the thing most easily forgotten
+  var nb = $("nextBadge");
+  var sendable = -1;
+  S.drafts.forEach(function(d, i){
+    if(sendable === -1
+       && d.every(function(x){ return x !== null; })
+       && !draftStillPlaying(d)
+       && openCourtFor(4)) sendable = i;
+  });
+  if(sendable !== -1){
+    nb.style.display = "";
+    nb.innerHTML = "";
+    var nd = document.createElement("span");
+    nd.className = "syncdot";
+    nd.style.background = "#FFD23F";
+    nb.appendChild(nd);
+    nb.appendChild(document.createTextNode("Next " + (sendable+1) + " can go on"));
+    nb.title = "Court " + openCourtFor(4).n + " is free and this lineup is complete";
+    nb.onclick = function(){
+      var t = openCourtFor(4);
+      if(!t) return;
+      var ids = S.drafts[sendable].slice();
+      S.drafts.splice(sendable, 1);
+      S.drafts.push([null,null,null,null]);
+      ids.forEach(function(id, i){ if(id) placeOnCourt(t, id, i); });
+      commit();
+    };
+  } else {
+    nb.style.display = "none";
+  }
 
   var readyIdx = [];
   reqs.forEach(function(r, i){ if(reqStatus(r).state === "ready") readyIdx.push(i+1); });
