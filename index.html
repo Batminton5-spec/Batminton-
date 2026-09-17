@@ -158,6 +158,13 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .rbar{height:100%;background:linear-gradient(90deg,#5A7A9E,var(--accent))}
 .rrec{font-size:17px;font-weight:600;width:42px;text-align:right;flex-shrink:0}
 .rpct{font-size:14px;color:var(--muted);width:38px;text-align:right;flex-shrink:0}
+.req{border-bottom:1px solid var(--line);padding:9px 13px}
+.req:last-child{border-bottom:none}
+.reqhead{display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+.reqnames{font-weight:600;font-size:14px;flex:1;min-width:120px}
+.reqstat{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:600;
+  padding:1px 6px;border-radius:2px;white-space:nowrap}
+.reqnote{font-size:12px;color:var(--muted);margin-top:2px}
 .draft{border-bottom:1px solid var(--line);padding:10px 13px}
 .draft:last-child{border-bottom:none}
 .dhead{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
@@ -271,6 +278,17 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
           <button class="btn sm" id="btnPlusDraft">+</button>
         </div>
         <div id="drafts"></div>
+      </div>
+
+      <div class="panel money">
+        <div class="phead">
+          <div class="ptitle">Requests</div>
+          <div class="pcount" id="reqCount"></div>
+          <div class="spacer"></div>
+          <button class="btn sm" id="btnAddReq">Add</button>
+          <button class="btn sm" id="btnToggleReq">Show</button>
+        </div>
+        <div id="requests"></div>
       </div>
 
     </div>
@@ -425,6 +443,7 @@ function freshState(){
   return {
     name:"Game #86", startedAt:Date.now(), gamesPlayed:0, rateOverride:null,
     drafts:[[null,null,null,null],[null,null,null,null],[null,null,null,null]], met:{}, log:[],
+    requests:[], showReq:false,
     courts:[mkCourt(1), mkCourt(2), mkCourt(3)],
     players:players, order:order, sort:"wait",
     cost:{cQty:3, cHrs:4, cRate:450, sQty:24, sPrice:80, xTrans:500, xMisc:1650}
@@ -1034,6 +1053,63 @@ function render(){
     });
   }
 
+
+  // requests
+  var rw = $("requests"); rw.innerHTML = "";
+  var reqs = S.requests || [];
+  var readyN = reqs.filter(function(r){ return reqStatus(r).state === "ready"; }).length;
+  $("reqCount").textContent = reqs.length
+    ? (reqs.length + (reqs.length === 1 ? " request" : " requests")
+       + (readyN ? (" \u00b7 " + readyN + " ready") : ""))
+    : "none yet";
+  $("btnToggleReq").textContent = S.showReq ? "Hide" : "Show";
+  rw.style.display = S.showReq ? "" : "none";
+
+  if(S.showReq){
+    if(!reqs.length){
+      rw.appendChild(el("div","empty-note","No requests. Add one when a group asks to play together."));
+    }
+    reqs.forEach(function(r){
+      var st = reqStatus(r);
+      var box = el("div","req");
+      var head = el("div","reqhead");
+      head.appendChild(el("div","reqnames",
+        reqMembers(r).map(function(p){ return p.name; }).join(" + ")));
+      var badge = el("span","reqstat",st.label);
+      badge.style.color = "#080A0E";
+      badge.style.background = st.color;
+      head.appendChild(badge);
+
+      var openDraft = -1;
+      S.drafts.forEach(function(d, i){
+        if(openDraft === -1 && d.every(function(x){ return x === null; })) openDraft = i;
+      });
+      var sb = el("button","btn sm" + (st.state === "ready" ? " go" : ""),
+        openDraft === -1 ? "No free lineup" : ("Stage in Next " + (openDraft+1)));
+      sb.disabled = openDraft === -1 || st.state === "waiting" || st.state === "broken";
+      sb.onclick = function(){ stageRequest(r, openDraft); };
+      head.appendChild(sb);
+
+      var x = el("button","btn sm ghost","\u00d7");
+      x.title = "Drop this request";
+      x.onclick = function(){
+        S.requests = S.requests.filter(function(q){ return q !== r; });
+        commit();
+      };
+      head.appendChild(x);
+      box.appendChild(head);
+
+      if(st.state === "ready"){
+        box.appendChild(el("div","reqnote","Nobody gets passed over \u2014 run it now."));
+      } else if(st.skips){
+        box.appendChild(el("div","reqnote",
+          st.skips + (st.skips === 1 ? " player has" : " players have")
+          + " waited longer. It gets cheaper every game you run without them."));
+      }
+      rw.appendChild(box);
+    });
+  }
+
   // money + tally
   var m = money();
   ["cQty","cHrs","cRate","sQty","sPrice","xTrans","xMisc"].forEach(function(k){ $(k).value = S.cost[k]; });
@@ -1227,6 +1303,106 @@ function sendPlayerModal(p){
       body.appendChild(el("div","note",
         "Every court is full and every lineup is complete. Add a lineup with + to stage more."));
     }
+  });
+}
+
+
+/* ---------- requests ---------- */
+// A request is a group who asked to play together. The question is not whether
+// to honour it but when: running it early means passing over people who have
+// waited longer. reqStatus measures exactly that cost.
+function reqMembers(r){
+  return r.members.map(function(id){ return S.players[id]; }).filter(Boolean);
+}
+function reqStatus(r){
+  var mem = reqMembers(r);
+  if(mem.length < 2) return {state:"broken", label:"needs 2+", color:"var(--muted)"};
+
+  var away = mem.filter(function(p){
+    return p.status !== "in" || p.paused || onCourt(p.id);
+  });
+  if(away.length){
+    return {state:"waiting", color:"var(--muted)",
+      label: away.length === 1 ? away[0].name + " not free" : away.length + " not free"};
+  }
+
+  // everyone is on the bench: how many longer-waiting players would be skipped?
+  var bench = availableList();
+  var ids = mem.map(function(p){ return p.id; });
+  var youngest = Math.min.apply(null, mem.map(function(p){ return idleOf(p); }));
+  var longer = bench.filter(function(p){
+    return ids.indexOf(p.id) === -1 && idleOf(p) > youngest;
+  }).length;
+  var fromQueue = Math.max(0, 4 - mem.length);   // spare slots go to the front anyway
+  var skips = Math.max(0, longer - fromQueue);
+
+  if(skips === 0) return {state:"ready", label:"ready", color:"#5FBF8A", skips:0};
+  if(skips <= 3) return {state:"soon", label:"skips " + skips, color:"#FFD23F", skips:skips};
+  return {state:"early", label:"skips " + skips, color:"#D6323C", skips:skips};
+}
+function readyRequest(){
+  var best = null, bestSkips = 1e9;
+  (S.requests || []).forEach(function(r){
+    var st = reqStatus(r);
+    if(st.state === "ready" && st.skips < bestSkips){ bestSkips = st.skips; best = r; }
+  });
+  return best;
+}
+// put a request into a lineup, topping up any spare slots from the queue
+function stageRequest(r, di){
+  var mem = reqMembers(r).filter(function(p){ return !onCourt(p.id); });
+  var d = [null,null,null,null], i = 0;
+  mem.slice(0,4).forEach(function(p){ unDraft(p.id); d[i++] = p.id; });
+  if(i < 4){
+    var fill = smartPick(4 - i, d.filter(Boolean));
+    fill.forEach(function(id){ if(i < 4) d[i++] = id; });
+  }
+  S.drafts[di] = bestSplit(d.slice());
+  S.requests = S.requests.filter(function(x){ return x !== r; });
+  commit();
+}
+function addRequestModal(){
+  var chosen = [];
+  modal("New request", function(body, foot, close){
+    body.appendChild(el("div","note","Pick 2 to 4 players who asked to play together."));
+    var listWrap = el("div","");
+    body.appendChild(listWrap);
+
+    var save = el("button","btn go","Save request");
+    save.disabled = true;
+    save.onclick = function(){
+      if(chosen.length < 2) return;
+      S.requests.push({id:"r"+Date.now(), members:chosen.slice(), at:Date.now()});
+      S.showReq = true;
+      close(); commit();
+    };
+    foot.appendChild(save);
+
+    function paint(){
+      listWrap.innerHTML = "";
+      save.disabled = chosen.length < 2;
+      save.textContent = chosen.length ? ("Save request (" + chosen.length + ")") : "Save request";
+      S.order.map(function(id){ return S.players[id]; })
+        .filter(function(p){ return p.status !== "out"; })
+        .sort(function(a,b){ return a.name.localeCompare(b.name); })
+        .forEach(function(p){
+          var on = chosen.indexOf(p.id) !== -1;
+          var b = document.createElement("button");
+          b.className = "pick";
+          b.appendChild(chip(p));
+          var nm = el("div","pn",p.name);
+          if(on) nm.style.color = "var(--accent)";
+          b.appendChild(nm);
+          b.appendChild(el("div","pt num", on ? "\u2713" : ""));
+          b.onclick = function(){
+            if(on) chosen = chosen.filter(function(x){ return x !== p.id; });
+            else if(chosen.length < 4) chosen.push(p.id);
+            paint();
+          };
+          listWrap.appendChild(b);
+        });
+    }
+    paint();
   });
 }
 
@@ -1967,6 +2143,14 @@ function wire(){
   $("btnSort").onclick = flipSort;
   $("btnHeroSort").onclick = flipSort;
   $("btnAutoDraft").onclick = function(){
+    var r = readyRequest();
+    if(r){
+      var slot = -1;
+      S.drafts.forEach(function(d, i){
+        if(slot === -1 && d.every(function(x){ return x === null; })) slot = i;
+      });
+      if(slot !== -1){ stageRequest(r, slot); }
+    }
     S.drafts.forEach(function(d, di){
       var need = d.filter(function(x){ return x === null; }).length;
       if(!need) return;
@@ -1988,6 +2172,8 @@ function wire(){
     S.drafts.pop();
     commit();
   };
+  $("btnAddReq").onclick = addRequestModal;
+  $("btnToggleReq").onclick = function(){ S.showReq = !S.showReq; commit(); };
   $("btnClearDrafts").onclick = function(){
     S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
     commit();
@@ -2010,6 +2196,7 @@ function wire(){
         S.drafts = S.drafts.map(function(){ return [null,null,null,null]; });
         S.met = {};
         S.log = [];
+        S.requests = [];
         S.order.forEach(function(id){
           var p = S.players[id];
           p.games=0; p.wins=0; p.losses=0; p.totalIdle=0; p.pay="unpaid"; p.status="notyet"; p.benchSince=null; p.paused=false;
@@ -2060,6 +2247,7 @@ load(function(saved){
     uid = max;
     if(!S.met) S.met = {};
     if(!S.log) S.log = [];
+    if(!S.requests) S.requests = [];
     if(!S.drafts || !S.drafts.length){
       S.drafts = [[null,null,null,null],[null,null,null,null],[null,null,null,null]];
     }
