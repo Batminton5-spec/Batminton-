@@ -198,6 +198,9 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .prow{display:flex;align-items:center;gap:8px;padding:6px 13px;opacity:.6}
 .prow .pn2{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .prow .pw{font-family:'Barlow Condensed',sans-serif;font-size:15px;color:var(--muted)}
+.dgames{font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:600;
+  color:var(--muted);padding-left:1px}
+.dchip.playing .dgames{color:var(--hot);opacity:.8}
 .dchip.playing{border-color:rgba(214,50,60,.55);color:var(--hot)}
 .dchip.playing .lv{opacity:.75}
 .dchip.add{background:transparent;border:1px dashed var(--line);color:var(--muted);font-weight:400}
@@ -1072,6 +1075,9 @@ function render(){
         b.className = busy ? "dchip playing" : "dchip";
         b.appendChild(chip(p));
         b.appendChild(el("span","",p.name));
+        var gc = el("span","dgames num", p.games);
+        gc.title = p.games + (p.games === 1 ? " game" : " games") + " played";
+        b.appendChild(gc);
         b.title = busy
           ? p.name + " is still on court " + busy.n + " \u2014 tap to take them out"
           : "Tap to take " + p.name + " out";
@@ -1154,6 +1160,11 @@ function render(){
       badge.style.background = st.color;
       head.appendChild(badge);
 
+      if(r.members.length === 4){
+        var mv = rateMatch(bestSplit(r.members.slice()));
+        if(mv) head.appendChild(verdictChip(mv));
+      }
+
       var openDraft = -1;
       S.drafts.forEach(function(d, i){
         if(openDraft === -1 && d.every(function(x){ return x === null; })) openDraft = i;
@@ -1199,8 +1210,8 @@ function render(){
         box.appendChild(el("div","reqnote","Nobody gets passed over \u2014 run it now."));
       } else if(st.skips){
         box.appendChild(el("div","reqnote",
-          st.skips + (st.skips === 1 ? " player has" : " players have")
-          + " waited longer. It gets cheaper every game you run without them."));
+          st.skips + (st.skips === 1 ? " player ahead of them" : " players ahead of them")
+          + " \u00b7 roughly " + st.eta + (st.eta === 1 ? " game away" : " games away")));
       }
       rw.appendChild(box);
     });
@@ -1410,6 +1421,11 @@ function sendPlayerModal(p){
 function reqMembers(r){
   return r.members.map(function(id){ return S.players[id]; }).filter(Boolean);
 }
+// Readiness measures one thing: how many people would be passed over if this
+// request went on now. It reads the queue the same way you are sorting it, and
+// it forgives differences inside the tolerance window, so it agrees with what
+// the bench shows. The count falls by roughly four per game, which is where the
+// "about N games" estimate comes from.
 function reqStatus(r){
   var mem = reqMembers(r);
   if(mem.length < 2) return {state:"broken", label:"needs 2+", color:"var(--muted)"};
@@ -1423,20 +1439,32 @@ function reqStatus(r){
       label: away.length === 1 ? away[0].name + " not free" : away.length + " not free"};
   }
 
-  // everyone is on the bench: how many longer-waiting players would be skipped?
-  var bench = availableList();
   var ids = mem.map(function(p){ return p.id; });
-  var youngest = Math.min.apply(null, mem.map(function(p){ return idleOf(p); }));
-  var longer = bench.filter(function(p){
-    return ids.indexOf(p.id) === -1 && idleOf(p) > youngest;
-  }).length;
-  var fromQueue = Math.max(0, 4 - mem.length);   // spare slots go to the front anyway
-  var skips = Math.max(0, longer - fromQueue);
+  var bench = benchList();                       // sorted by whichever mode is on
+  var mine = bench.filter(function(p){ return ids.indexOf(p.id) !== -1; });
+  if(mine.length !== mem.length){
+    return {state:"waiting", label:"not all free", color:"var(--muted)"};
+  }
+  var last = mine[mine.length - 1];               // member furthest back in the queue
 
-  if(skips === 0) return {state:"ready", label:"ready", color:"#5FBF8A", skips:0};
-  if(skips <= 3) return {state:"soon", label:"skips " + skips, color:"#FFD23F", skips:skips};
-  return {state:"early", label:"skips " + skips, color:"#D6323C", skips:skips};
+  var byGames = S.sort === "games";
+  var ahead = bench.filter(function(p){
+    if(ids.indexOf(p.id) !== -1) return false;
+    return byGames
+      ? p.games < last.games                      // fewer games played = ahead of them
+      : idleOf(p) > idleOf(last) + IDLE_TOLERANCE; // a clear wait, not a near tie
+  }).length;
+
+  var fromQueue = Math.max(0, 4 - mem.length);    // spare slots go to the front anyway
+  var skips = Math.max(0, ahead - fromQueue);
+  var eta = Math.ceil(skips / 4);                 // four leave the bench per game
+
+  if(skips === 0) return {state:"ready", label:"ready", color:"#5FBF8A", skips:0, eta:0};
+  if(eta <= 1) return {state:"soon", label:"about 1 game", color:"#FFD23F", skips:skips, eta:1};
+  return {state:"early", label:"about " + eta + " games", color:"#E0873A",
+          skips:skips, eta:eta};
 }
+
 function readyRequest(){
   var best = null, bestSkips = 1e9;
   (S.requests || []).forEach(function(r){
