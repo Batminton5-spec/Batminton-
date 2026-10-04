@@ -212,6 +212,10 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
 .dvs{color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:15px;padding:0 2px}
 .btag{font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:600;color:var(--accent);
   border:1px solid rgba(255,210,63,.4);border-radius:2px;padding:0 4px;flex-shrink:0}
+.offbar{background:rgba(214,50,60,.12);border:1px solid rgba(214,50,60,.5);border-radius:3px;
+  padding:10px 13px;margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.offbar .ot{font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:16px;color:#D6323C}
+.offbar .od{font-size:13px;color:var(--chalk);flex:1;min-width:180px}
 .nextalert{background:transparent;border:1px solid rgba(255,210,63,.55);border-radius:3px;
   color:var(--chalk);font-family:'Barlow',sans-serif;font-size:13px;padding:2px 8px;cursor:pointer}
 .nextalert:hover{border-color:var(--accent)}
@@ -258,6 +262,8 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--chalk);
     <button class="link" id="btnSync">Sync</button>
     <button class="link" id="btnReset">Reset</button>
   </div>
+
+  <div id="offlineBar" style="display:none"></div>
 
   <div class="hero">
     <div class="hero-head">
@@ -472,7 +478,7 @@ function freshState(){
   SEED.forEach(function(p){
     var id = "p" + (uid++);
     players[id] = {id:id, name:p[0], level:p[1], status:"notyet",
-                   games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false};
+                   games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false, sameLevel:false};
     order.push(id);
   });
   return {
@@ -729,6 +735,47 @@ function repeatPenalty(ids){
   return total;
 }
 
+// Some players only want matches where everyone is at their level. Searching for
+// that inside the normal candidate window never works, because the window is only
+// a handful of names. So a level-locked player gets their own path: build the
+// foursome from everyone at their level, or leave them on the bench this round.
+// The rule loosens with waiting so nobody is stranded for the evening.
+var STRICT_RELAX_1 = 1200;   // 20 min: one level either side becomes acceptable
+var STRICT_RELAX_2 = 2100;   // 35 min: take whatever is going
+
+function strictAllowance(p){
+  var w = idleOf(p);
+  if(w > STRICT_RELAX_2) return 99;
+  if(w > STRICT_RELAX_1) return 1;
+  return 0;
+}
+// does this set of four violate anyone's level lock?
+function strictBreach(ids){
+  var players = ids.filter(Boolean).map(function(id){ return S.players[id]; }).filter(Boolean);
+  if(players.length !== 4) return 0;
+  var worst = 0;
+  players.forEach(function(p){
+    if(!p.sameLevel) return;
+    var allow = strictAllowance(p);
+    var base = lvIndex(p.level);
+    players.forEach(function(q){
+      var d = Math.abs(lvIndex(q.level) - base);
+      if(d > allow && d - allow > worst) worst = d - allow;
+    });
+  });
+  return worst;
+}
+// the same-level four for this player, longest waiting first, or null
+function strictFour(p, pool){
+  var allow = strictAllowance(p);
+  var base = lvIndex(p.level);
+  var mates = pool.filter(function(q){
+    return q.id !== p.id && Math.abs(lvIndex(q.level) - base) <= allow;
+  });
+  if(mates.length < 3) return null;
+  return [p].concat(mates.slice(0, 3));
+}
+
 function sampleN(arr, n){
   var c = arr.slice();
   for(var i=c.length-1;i>0;i--){
@@ -762,6 +809,31 @@ function smartPick(need, fixed){
   var edge = effWait(pool[Math.min(need, pool.length) - 1], avgGames) - IDLE_TOLERANCE;
   var cands = pool.filter(function(p){ return effWait(p, avgGames) >= edge; });
   if(cands.length < need) cands = pool.slice(0, need);
+
+  // a level-locked player near the front gets their own match built, or waits
+  if(need === 4 && !fixed.length){
+    var locked = cands.filter(function(p){ return p.sameLevel; });
+    for(var li=0; li<locked.length; li++){
+      var four = strictFour(locked[li], pool);
+      if(four) return bestSplit(four.map(function(p){ return p.id; }));
+    }
+  }
+
+  // with slots already taken, a locked player can only join if the players
+  // already there are within their allowance
+  if(fixed.length){
+    var fixedLv = fixed.map(function(id){ return lvIndex(S.players[id].level); });
+    cands = cands.filter(function(p){
+      if(!p.sameLevel) return true;
+      var allow = strictAllowance(p);
+      var base = lvIndex(p.level);
+      return fixedLv.every(function(l){ return Math.abs(l - base) <= allow; });
+    });
+  }
+  if(cands.length < need){
+    cands = pool.slice(0, Math.max(need, 4));
+  }
+
   if(cands.length === need) return cands.map(function(p){ return p.id; });
 
   // if a second court is also empty, judge what this pick leaves behind
@@ -777,7 +849,10 @@ function smartPick(need, fixed){
     var pick = sampleN(cands, need);
     var ids = fixed.concat(pick.map(function(p){ return p.id; }));
     var sc = 0;
-    if(ids.length === 4) sc += matchQuality(bestSplit(ids));
+    if(ids.length === 4){
+      sc += matchQuality(bestSplit(ids));
+      sc -= strictBreach(ids) * 100000;      // never mix a level-locked player in
+    }
     sc -= repeatPenalty(ids) * 9;
 
     // one term covers both: time waited and games already played
@@ -798,6 +873,24 @@ function smartPick(need, fixed){
     }
 
     if(sc > bestScore){ bestScore = sc; best = pick; }
+  }
+
+  // every sampled set broke somebody's lock: take them out and pick again
+  if(bestScore < -50000){
+    var clean = cands.filter(function(p){ return !p.sameLevel || strictAllowance(p) >= 2; });
+    if(clean.length >= need){
+      var alt = null, altScore = -Infinity;
+      for(var u=0; u<tries; u++){
+        var pk = sampleN(clean, need);
+        var aid = fixed.concat(pk.map(function(p){ return p.id; }));
+        var as = 0;
+        if(aid.length === 4) as += matchQuality(bestSplit(aid));
+        as -= repeatPenalty(aid) * 9;
+        as += (pk.reduce(function(a,p){ return a + effWait(p, avgGames); }, 0) / 60) * 0.4;
+        if(as > altScore){ altScore = as; alt = pk; }
+      }
+      if(alt) return alt.map(function(p){ return p.id; });
+    }
   }
   return best.map(function(p){ return p.id; });
 }
@@ -866,8 +959,10 @@ function endGame(court, winner){
   });
   recordMeeting(court.slots);
   if(!S.log) S.log = [];
+  var nextN = (S.gamesPlayed || 0) + 1;
+  (S.log || []).forEach(function(g){ if(g.n >= nextN) nextN = g.n + 1; });
   S.log.push({
-    n: (S.gamesPlayed||0) + 1,
+    n: nextN,
     court: court.n,
     at: now,
     dur: court.startedAt ? Math.round((now - court.startedAt)/1000) : null,
@@ -968,7 +1063,7 @@ function render(){
     if(v) nv.appendChild(verdictChip(v));
   }
   var openCourt = openCourtFor(4);
-  $("btnSend").disabled = !(openCourt && free.length >= 4);
+  $("btnSend").disabled = !(openCourt && free.length >= 4) || syncBlocked();
   $("btnSend").textContent = openCourt ? ("Send to court " + openCourt.n) : "No open court";
 
   // courts
@@ -993,6 +1088,7 @@ function render(){
     }
     if(filled > 0){
       var eb = el("button","btn sm go","End game");
+      eb.disabled = syncBlocked();
       eb.onclick = function(){
         if(filled === 4) askWinner(court);
         else endGame(court, null);
@@ -1008,6 +1104,7 @@ function render(){
       });
       if(ready !== -1){
         var nb2 = el("button","btn sm go","Send Next " + (ready+1));
+        nb2.disabled = syncBlocked();
         nb2.title = "Put the staged lineup on this court";
         nb2.onclick = function(){
           var ids = S.drafts[ready].slice();
@@ -1088,6 +1185,25 @@ function render(){
       commit();
     };
     r.appendChild(pz);
+
+    if(p.sameLevel){
+      var lt = el("div","btag", "=");
+      var w8 = idleOf(p);
+      if(w8 > STRICT_RELAX_2){
+        lt.style.color = "var(--hot)";
+        lt.style.borderColor = "rgba(214,50,60,.45)";
+        lt.title = p.name + " wants their own level, but has waited " + fmt(w8)
+                   + " \u2014 the rule has been dropped so they can play";
+      } else if(w8 > STRICT_RELAX_1){
+        lt.style.color = "#E0873A";
+        lt.style.borderColor = "rgba(224,135,58,.45)";
+        lt.title = p.name + " wants their own level \u2014 after " + fmt(w8)
+                   + " waiting, one level either side is now allowed";
+      } else {
+        lt.title = p.name + " is only auto-matched with their own level";
+      }
+      r.appendChild(lt);
+    }
 
     var heldBy = requestOf(p.id);
     if(heldBy){
@@ -1176,7 +1292,7 @@ function render(){
       var waiting = draftStillPlaying(d);
       var sb = el("button","btn sm go",
         waiting ? "Still playing" : (target ? ("Send to court " + target.n) : "No open court"));
-      sb.disabled = !target || waiting;
+      sb.disabled = !target || waiting || syncBlocked();
       if(waiting) sb.title = "Someone in this lineup is still on a court";
       sb.onclick = function(){
         var ids = d.slice();
@@ -1253,6 +1369,26 @@ function render(){
     : "none yet";
   $("btnToggleReq").textContent = S.showReq ? "Hide" : "Show";
 
+  // offline warning: the one state where two phones can silently diverge
+  var ob = $("offlineBar");
+  if(sync.on && !sync.connected){
+    ob.style.display = "";
+    ob.className = "offbar";
+    ob.innerHTML = "";
+    ob.appendChild(el("div","ot", sync.override ? "OFFLINE" : "OFFLINE \u2014 LOCKED"));
+    ob.appendChild(el("div","od", sync.override
+      ? "Changes are not reaching the other phone. They may be overwritten, or collide, when the connection returns."
+      : "This phone cannot reach the other one. Sending and ending games is locked so the two boards cannot drift apart."));
+    if(!sync.override){
+      var ovb = el("button","btn sm","Carry on anyway");
+      ovb.title = "Unlock. Only do this if the other phone has stopped.";
+      ovb.onclick = function(){ sync.override = true; render(); };
+      ob.appendChild(ovb);
+    }
+  } else {
+    ob.style.display = "none";
+  }
+
   // a staged lineup with a court free is the thing most easily forgotten
   var nb = $("nextBadge");
   var sendable = -1;
@@ -1262,7 +1398,7 @@ function render(){
        && !draftStillPlaying(d)
        && openCourtFor(4)) sendable = i;
   });
-  if(sendable !== -1){
+  if(sendable !== -1 && !syncBlocked()){
     nb.style.display = "";
     nb.innerHTML = "";
     var nd = document.createElement("span");
@@ -1809,7 +1945,7 @@ function rosterModal(){
       if(!nm) return;
       var id = "p" + (uid++);
       S.players[id] = {id:id, name:nm, level:sel.value, status:"notyet",
-                       games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false};
+                       games:0, wins:0, losses:0, benchSince:null, totalIdle:0, pay:"unpaid", paused:false, exempt:false, sameLevel:false};
       S.order.push(id);
       close(); commit(); rosterModal();
     }
@@ -1818,7 +1954,8 @@ function rosterModal(){
     f.appendChild(inp); f.appendChild(sel); f.appendChild(add);
     body.appendChild(f);
     body.appendChild(el("div","note",
-      "New players start as not arrived. Change a level any time \u2014 it only affects match ratings."));
+      "New players start as not arrived. Change a level any time \u2014 it only affects match ratings. "
+      + "= means auto-fill only pairs them with their own level; QM means they do not pay."));
 
     S.order.map(function(id){ return S.players[id]; })
       .sort(function(a,b){ return a.name.localeCompare(b.name); })
@@ -1835,6 +1972,13 @@ function rosterModal(){
         });
         ls.onchange = function(){ p.level = this.value; save(); render(); };
         r.appendChild(ls);
+        var lk = el("button", p.sameLevel ? "btn sm go" : "btn sm ghost", "=");
+        lk.title = p.sameLevel
+          ? p.name + " is only auto-matched with their own level \u2014 tap to allow any match"
+          : "Only auto-match " + p.name + " with players at their level";
+        lk.onclick = function(){ p.sameLevel = !p.sameLevel; save(); render(); close(); rosterModal(); };
+        r.appendChild(lk);
+
         var fx = el("button", p.exempt ? "btn sm go" : "btn sm ghost", "QM");
         fx.title = p.exempt
           ? p.name + " is a queue master and pays nothing \u2014 tap to charge them again"
@@ -2051,6 +2195,79 @@ function applyResult(entry, winner, sign){
     if(p) p.losses = Math.max(0, (p.losses||0) + sign);
   });
 }
+function unmeet(ids){
+  if(!S.met) return;
+  var list = ids.filter(Boolean);
+  for(var i=0;i<list.length;i++){
+    for(var j=i+1;j<list.length;j++){
+      var k = pairKey(list[i], list[j]);
+      var e = metEntry(k);
+      if(!e) continue;
+      if(e.n <= 1) delete S.met[k];
+      else S.met[k] = {n: e.n - 1, last: e.last};
+    }
+  }
+}
+function deleteGame(entry){
+  applyResult(entry, entry.won, -1);                 // undo the win and loss
+  var ids = entry.a.concat(entry.b).filter(Boolean);
+  ids.forEach(function(id){
+    var p = S.players[id];
+    if(p) p.games = Math.max(0, p.games - 1);        // undo the game played
+  });
+  unmeet(ids);                                       // undo the pairing memory
+  S.log = (S.log || []).filter(function(g){ return g !== entry; });
+  S.gamesPlayed = Math.max(0, (S.gamesPlayed || 0) - 1);
+  commit();
+}
+// two records of the same four on the same court whose times overlap cannot
+// both be real: a sign the two phones diverged while the connection was down
+function suspectDuplicate(entry, log){
+  var ids = entry.a.concat(entry.b).filter(Boolean).slice().sort().join(",");
+  return log.some(function(g){
+    if(g === entry) return false;
+    if(g.court !== entry.court) return false;
+    var gids = g.a.concat(g.b).filter(Boolean).slice().sort().join(",");
+    if(gids !== ids) return false;
+    var aStart = entry.at - (entry.dur || 0) * 1000;
+    var bStart = g.at - (g.dur || 0) * 1000;
+    return aStart < g.at && bStart < entry.at;       // the two spans overlap
+  });
+}
+// Deterministic repair: if two records of the same four on the same court overlap
+// in time, one of them cannot have happened. Keep the one that started first and
+// unwind the other. Both phones apply the same rule, so they converge.
+function repairLog(){
+  var log = S.log || [];
+  var removed = [];
+  for(var i=0;i<log.length;i++){
+    for(var j=i+1;j<log.length;j++){
+      var a = log[i], b = log[j];
+      if(!a || !b || a.court !== b.court) continue;
+      var ka = a.a.concat(a.b).filter(Boolean).slice().sort().join(",");
+      var kb = b.a.concat(b.b).filter(Boolean).slice().sort().join(",");
+      if(ka !== kb) continue;
+      var sa = a.at - (a.dur || 0) * 1000;
+      var sb = b.at - (b.dur || 0) * 1000;
+      if(!(sa < b.at && sb < a.at)) continue;       // spans do not overlap
+      var drop = sa <= sb ? b : a;                   // keep the earlier start
+      if(removed.indexOf(drop) === -1) removed.push(drop);
+    }
+  }
+  if(!removed.length) return 0;
+  removed.forEach(function(g){
+    applyResult(g, g.won, -1);
+    var ids = g.a.concat(g.b).filter(Boolean);
+    ids.forEach(function(id){
+      var p = S.players[id];
+      if(p) p.games = Math.max(0, p.games - 1);
+    });
+    unmeet(ids);
+    S.gamesPlayed = Math.max(0, (S.gamesPlayed || 0) - 1);
+  });
+  S.log = log.filter(function(g){ return removed.indexOf(g) === -1; });
+  return removed.length;
+}
 function setWinner(entry, winner){
   if(entry.won === winner) return;
   applyResult(entry, entry.won, -1);
@@ -2070,8 +2287,11 @@ function logModal(){
       body.appendChild(el("div","empty-note","No games finished yet."));
       return;
     }
+    var dupes = log.filter(function(g){ return suspectDuplicate(g, log); }).length;
     body.appendChild(el("div","note",
-      log.length + (log.length === 1 ? " game" : " games") + " \u00b7 tap a side to correct who won"));
+      log.length + (log.length === 1 ? " game" : " games")
+      + " \u00b7 tap a side to correct who won, \u00d7 to delete"
+      + (dupes ? ("  \u2014  " + dupes + " records overlap and need checking") : "")));
 
     log.forEach(function(g){
       var box = el("div","logrow");
@@ -2081,6 +2301,27 @@ function logModal(){
       head.appendChild(el("span","logmeta","court " + g.court));
       if(g.dur) head.appendChild(el("span","logmeta num", fmt(g.dur)));
       head.appendChild(el("span","logmeta", new Date(g.at).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})));
+
+      var dupe = suspectDuplicate(g, log);
+      if(dupe){
+        var db = el("span","vd","overlaps");
+        db.style.color = "#080A0E";
+        db.style.background = "#E0873A";
+        db.style.fontSize = "12px";
+        db.title = "Another record of the same four on this court overlaps in time. "
+                 + "One of them is not real.";
+        head.appendChild(db);
+      }
+
+      head.appendChild(el("div","spacer"));
+      var xb = el("button","btn sm ghost","\u00d7");
+      xb.title = "Delete this game and undo its games played, wins and losses";
+      xb.onclick = function(){
+        if(xb.textContent === "\u00d7"){ xb.textContent = "sure?"; return; }
+        deleteGame(g);
+        close(); logModal();
+      };
+      head.appendChild(xb);
       box.appendChild(head);
 
       [0,1].forEach(function(side){
@@ -2097,7 +2338,10 @@ function logModal(){
         box.appendChild(b);
       });
 
-      if(g.won === null){
+      if(dupe){
+        box.appendChild(el("div","lognores",
+          "Overlaps another record of the same four \u2014 delete whichever is wrong."));
+      } else if(g.won === null){
         box.appendChild(el("div","lognores","no result recorded"));
       }
       body.appendChild(box);
@@ -2275,7 +2519,8 @@ function summaryModal(){
 
 /* ---------- live sync (optional) ---------- */
 var SYNC_KEY = "badminton-sync-config-v1";
-var sync = {on:false, ref:null, me:null, status:"off", room:"", err:""};
+var sync = {on:false, ref:null, me:null, status:"off", room:"", err:"",
+            connected:false, override:false, connRef:null};
 
 function myId(){
   if(!sync.me){
@@ -2315,7 +2560,8 @@ function setSyncStatus(st, err){
   b.appendChild(dot);
   b.appendChild(document.createTextNode(
     st === "live" ? ("live \u00b7 " + sync.room)
-    : st === "connecting" ? "connecting" : "sync error"));
+    : st === "connecting" ? "connecting"
+    : st === "offline" ? "offline" : "sync error"));
 }
 function startSync(cfg){
   if(!cfg || !cfg.config || !cfg.room) return;
@@ -2333,6 +2579,19 @@ function startSync(cfg){
     sync.room = cfg.room;
     sync.ref = window.firebase.database().ref("rooms/" + cfg.room);
     sync.on = true;
+
+    // Firebase reports the live connection here. While it is false this phone is
+    // working from a copy that the other phone cannot see, which is exactly how
+    // two courts end up with the same four players.
+    try{ if(sync.connRef) sync.connRef.off(); }catch(e){}
+    sync.connRef = window.firebase.database().ref(".info/connected");
+    sync.connRef.on("value", function(snap){
+      var up = !!snap.val();
+      if(up && !sync.connected) sync.override = false;   // recovered: lock again
+      sync.connected = up;
+      setSyncStatus(up ? "live" : "offline");
+      render();
+    });
     sync.ref.on("value", function(snap){
       var v = snap.val();
       if(!v){ pushSync(); setSyncStatus("live"); return; }
@@ -2343,7 +2602,9 @@ function startSync(cfg){
         var incoming = JSON.parse(v.blob);
         if(incoming && incoming.players && incoming.order){
           S = incoming;
+          var fixed = repairLog();
           save();
+          if(fixed) pushSync();          // share the corrected board
           render();
         }
       }catch(e){}
@@ -2355,8 +2616,16 @@ function startSync(cfg){
 }
 function stopSync(){
   try{ if(sync.ref) sync.ref.off(); }catch(e){}
+  try{ if(sync.connRef) sync.connRef.off(); }catch(e){}
+  sync.connRef = null;
   sync.ref = null; sync.on = false; sync.room = "";
+  sync.connected = false; sync.override = false;
   setSyncStatus("off");
+}
+// true when this phone is syncing but currently cut off: anything it changes now
+// can collide with the other phone when the connection returns
+function syncBlocked(){
+  return sync.on && !sync.connected && !sync.override;
 }
 function pushSync(){
   if(!sync.on || !sync.ref) return;
@@ -2558,6 +2827,7 @@ load(function(saved){
       if(typeof p.wins !== "number") p.wins = 0;
       if(typeof p.paused !== "boolean") p.paused = false;
       if(typeof p.exempt !== "boolean") p.exempt = false;
+      if(typeof p.sameLevel !== "boolean") p.sameLevel = false;
       if(typeof p.losses !== "number") p.losses = 0;
     });
     uid = max;
@@ -2570,6 +2840,7 @@ load(function(saved){
   } else {
     S = freshState();
   }
+  if(S.log && S.log.length) repairLog();
   wire(); render();
   setInterval(tick, 1000);
   var sc = loadSyncConfig();
